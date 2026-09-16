@@ -25,6 +25,7 @@ def load(
     x1_level=None,
     mini_meta=False,
     ps_adjust=False,
+    cluster_col=None,
 ):
     """
     Loads data in preparation for estimation statistics.
@@ -88,6 +89,20 @@ def load(
     ps_adjust : boolean, default False
         Indicator of whether to adjust calculated p-value according to Phipson & Smyth (2010)
         # https://doi.org/10.2202/1544-6115.1585
+    cluster_col : string, default None
+        Name of the column identifying the independent sampling unit (cluster)
+        that each observation belongs to, for example a participant who
+        contributes several observations, or several pairs of paired
+        observations. When supplied, the bootstrap resamples whole clusters
+        with replacement (a cluster bootstrap) and the permutation test
+        reshuffles labels at the cluster level, so that the confidence
+        intervals and permutation p-values account for the correlation between
+        observations from the same cluster. This works with both unpaired data
+        and paired data (`paired` with `id_col`): for paired data, `id_col`
+        identifies the pairs and `cluster_col` the units the pairs are nested
+        in, and every pair must belong to a single cluster. The parametric and
+        rank-based tests reported in `statistical_tests` do not account for
+        clustering.
 
     Returns
     -------
@@ -112,6 +127,7 @@ def load(
         x1_level,
         mini_meta,
         ps_adjust,
+        cluster_col=cluster_col,
     )
 
 # %% ../nbs/API/load.ipynb #570ff65a

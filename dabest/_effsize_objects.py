@@ -59,6 +59,16 @@ class TwoGroupsEffectSize(object):
         ps_adjust : boolean, default False.
             If True, adjust calculated p-value according to Phipson & Smyth (2010)
             # https://doi.org/10.2202/1544-6115.1585
+        control_clusters : array-like, default None
+        test_clusters : array-like, default None
+            The cluster (e.g. participant) that each observation in `control`
+            and `test` belongs to. When supplied, the bootstrap resamples whole
+            clusters with replacement and the permutation test reshuffles
+            labels at the cluster level, so that the confidence interval and
+            permutation p-value account for the correlation between
+            observations from the same cluster. A label present in both
+            arrays denotes the same cluster. For paired data the two arrays
+            must be identical, since observations are paired by position.
             
 
         Returns
@@ -98,6 +108,8 @@ class TwoGroupsEffectSize(object):
         permutation_count=5000,
         random_seed=12345,
         ps_adjust=False,
+        control_clusters=None,
+        test_clusters=None,
     ):
         from ._stats_tools import confint_2group_diff as ci2g
         from ._stats_tools import effsize as es
@@ -118,7 +130,8 @@ class TwoGroupsEffectSize(object):
         self.__ci = ci
         self.__is_proportional = proportional
         self.__ps_adjust = ps_adjust
-        self._check_errors(control, test)
+        self.__is_clustered = control_clusters is not None or test_clusters is not None
+        self._check_errors(control, test, control_clusters, test_clusters)
 
         # Convert to numpy arrays for speed.
         # NaNs are automatically dropped.
@@ -128,26 +141,65 @@ class TwoGroupsEffectSize(object):
         self.__test = test[~isnan(test)]
         self.__permutation_count = permutation_count
 
+        if self.__is_clustered:
+            # Keep the cluster labels aligned with the NaN-filtered observations.
+            self.__control_clusters = array(control_clusters)[~isnan(control)]
+            self.__test_clusters = array(test_clusters)[~isnan(test)]
+            (control_codes, test_codes), self.__n_clusters = ci2g.cluster_codes(
+                self.__control_clusters, self.__test_clusters
+            )
+            if self.__is_paired and not np.array_equal(control_codes, test_codes):
+                err1 = "In a paired analysis every control observation must belong to the same "
+                err2 = "cluster as the test observation it is paired with. Check that the data "
+                err3 = "are sorted so that paired rows are aligned, and that each pair has a single cluster label."
+                raise ValueError(err1 + err2 + err3)
+        else:
+            self.__control_clusters = None
+            self.__test_clusters = None
+            self.__n_clusters = None
+
         self.__alpha = ci2g._compute_alpha_from_ci(self.__ci)
 
         self.__difference = es.two_group_difference(
             self.__control, self.__test, self.__is_paired, self.__effect_size
         )
 
-        self.__jackknives = ci2g.compute_meandiff_jackknife(
-            self.__control, self.__test, self.__is_paired, self.__effect_size
-        )
+        if self.__is_clustered:
+            self.__jackknives = ci2g.compute_cluster_jackknife(
+                self.__control,
+                self.__test,
+                self.__control_clusters,
+                self.__test_clusters,
+                self.__is_paired,
+                self.__effect_size,
+            )
+        else:
+            self.__jackknives = ci2g.compute_meandiff_jackknife(
+                self.__control, self.__test, self.__is_paired, self.__effect_size
+            )
 
         self.__acceleration_value = ci2g._calc_accel(self.__jackknives)
 
-        bootstraps = ci2g.compute_bootstrapped_diff(
-            self.__control,
-            self.__test,
-            self.__is_paired,
-            self.__effect_size,
-            self.__resamples,
-            self.__random_seed,
-        )
+        if self.__is_clustered:
+            bootstraps = ci2g.compute_cluster_bootstrapped_diff(
+                self.__control,
+                self.__test,
+                self.__control_clusters,
+                self.__test_clusters,
+                self.__is_paired,
+                self.__effect_size,
+                self.__resamples,
+                self.__random_seed,
+            )
+        else:
+            bootstraps = ci2g.compute_bootstrapped_diff(
+                self.__control,
+                self.__test,
+                self.__is_paired,
+                self.__effect_size,
+                self.__resamples,
+                self.__random_seed,
+            )
         self.__bootstraps = bootstraps
 
         sorted_bootstraps = npsort(self.__bootstraps)
@@ -223,13 +275,21 @@ class TwoGroupsEffectSize(object):
 
         pval_rounded = base_string_fmt.format(self.pvalue_permutation)
 
-        p1 = "The p-value of the two-sided permutation t-test is {}, ".format(
-            pval_rounded
-        )
+        if self.__is_clustered:
+            p1 = "The p-value of the two-sided cluster-level permutation test is {}, ".format(
+                pval_rounded
+            )
+            bs1 = "{} cluster bootstrap samples were taken, resampling {} clusters with replacement; ".format(
+                self.__resamples, self.__n_clusters
+            )
+        else:
+            p1 = "The p-value of the two-sided permutation t-test is {}, ".format(
+                pval_rounded
+            )
+            bs1 = "{} bootstrap samples were taken; ".format(self.__resamples)
         p2 = "calculated for legacy purposes only. "
         pvalue = p1 + p2
 
-        bs1 = "{} bootstrap samples were taken; ".format(self.__resamples)
         bs2 = "the confidence interval is bias-corrected and accelerated."
         bs = bs1 + bs2
 
@@ -253,10 +313,20 @@ class TwoGroupsEffectSize(object):
         else:
             return "{}\n{}".format(out, pvalue)
 
-    def _check_errors(self, control, test):
+    def _check_errors(self, control, test, control_clusters=None, test_clusters=None):
         '''
         Function to check configuration errors for the given control and test data.
         '''
+        if self.__is_clustered:
+            if control_clusters is None or test_clusters is None:
+                err1 = "Both `control_clusters` and `test_clusters` must be supplied "
+                err2 = "for a cluster-aware analysis."
+                raise ValueError(err1 + err2)
+            if len(control_clusters) != len(control) or len(test_clusters) != len(test):
+                err1 = "`control_clusters` and `test_clusters` must have the same lengths "
+                err2 = "as `control` and `test` respectively."
+                raise ValueError(err1 + err2)
+
         kosher_es = [a for a in self.__EFFECT_SIZE_DICT.keys()]
         if self.__effect_size not in kosher_es:
             err1 = "The effect size '{}'".format(self.__effect_size)
@@ -342,6 +412,8 @@ class TwoGroupsEffectSize(object):
             self.__is_paired,
             self.__permutation_count,
             ps_adjust = self.__ps_adjust,
+            control_clusters=self.__control_clusters,
+            test_clusters=self.__test_clusters,
         )
 
         if self.__is_paired and not self.__is_proportional:
@@ -462,20 +534,41 @@ class TwoGroupsEffectSize(object):
         )
         self.__bec_difference = difference
 
-        jackknives = ci2g.compute_meandiff_jackknife(
-            self.__control, self.__control, is_paired, self.__effect_size
-        )
+        if self.__is_clustered:
+            # The two copies of the control group are resampled independently,
+            # so the clusters of the second copy are given distinct labels.
+            (codes,), n_clusters = ci2g.cluster_codes(self.__control_clusters)
+            codes_copy = codes + n_clusters
+            jackknives = ci2g.compute_cluster_jackknife(
+                self.__control, self.__control, codes, codes_copy, is_paired, self.__effect_size
+            )
+        else:
+            jackknives = ci2g.compute_meandiff_jackknife(
+                self.__control, self.__control, is_paired, self.__effect_size
+            )
 
         acceleration_value = ci2g._calc_accel(jackknives)
 
-        bootstraps = ci2g.compute_bootstrapped_diff(
-            self.__control,
-            self.__control,
-            is_paired,
-            self.__effect_size,
-            self.__resamples,
-            self.__random_seed,
-        )
+        if self.__is_clustered:
+            bootstraps = ci2g.compute_cluster_bootstrapped_diff(
+                self.__control,
+                self.__control,
+                codes,
+                codes_copy,
+                is_paired,
+                self.__effect_size,
+                self.__resamples,
+                self.__random_seed,
+            )
+        else:
+            bootstraps = ci2g.compute_bootstrapped_diff(
+                self.__control,
+                self.__control,
+                is_paired,
+                self.__effect_size,
+                self.__resamples,
+                self.__random_seed,
+            )
         self.__bootstraps_baseline_ec = bootstraps
 
         sorted_bootstraps = npsort(self.__bootstraps_baseline_ec)
@@ -557,6 +650,22 @@ class TwoGroupsEffectSize(object):
     @property
     def is_proportional(self):
         return self.__is_proportional
+
+    @property
+    def is_clustered(self):
+        """
+        Whether whole clusters of observations, rather than individual
+        observations, were resampled by the bootstrap and permutation test.
+        """
+        return self.__is_clustered
+
+    @property
+    def n_clusters(self):
+        """
+        The number of distinct clusters resampled by the cluster bootstrap;
+        None if the observations are not clustered.
+        """
+        return self.__n_clusters
 
     @property
     def ci(self):
@@ -876,8 +985,17 @@ class EffectSizeDataFrame(object):
         reprs = []
 
         grouped_data = {name: group[yvar].copy() for name, group in dat.groupby(xvar, observed=False)}
+
+        # The cluster label of every observation, for a cluster-aware analysis.
+        cluster_col = getattr(self.__dabest_obj, "cluster_col", None)
+        if cluster_col is not None:
+            grouped_clusters = {name: group[cluster_col].to_numpy() for name, group in dat.groupby(xvar, observed=False)}
+        else:
+            grouped_clusters = {name: None for name in grouped_data}
+
         if self.__delta2:
             mixed_data = []
+            mixed_clusters = []
             for j, current_tuple in enumerate(idx):
                 if self.__is_paired != "sequential":
                     cname = current_tuple[0]
@@ -890,6 +1008,8 @@ class EffectSizeDataFrame(object):
                     test = grouped_data[tname]
                     mixed_data.append(control)
                     mixed_data.append(test)
+                    mixed_clusters.append(grouped_clusters[cname])
+                    mixed_clusters.append(grouped_clusters[tname])
             bootstraps_delta_delta = ci2g.compute_delta2_bootstrapped_diff(
                 mixed_data[0],
                 mixed_data[1],
@@ -899,6 +1019,7 @@ class EffectSizeDataFrame(object):
                 self.__resamples,
                 self.__random_seed,
                 self.__is_proportional,
+                clusters=mixed_clusters if cluster_col is not None else None,
             )
 
         for j, current_tuple in enumerate(idx):
@@ -921,7 +1042,9 @@ class EffectSizeDataFrame(object):
                     self.__resamples,
                     self.__permutation_count,
                     self.__random_seed,
-                    self.__ps_adjust
+                    self.__ps_adjust,
+                    control_clusters=grouped_clusters[cname],
+                    test_clusters=grouped_clusters[tname],
                 )
                 r_dict = result.to_dict()
                 r_dict["control"] = cname
@@ -961,6 +1084,7 @@ class EffectSizeDataFrame(object):
             "test",
             "control_N",
             "test_N",
+            "n_clusters",
             "effect_size",
             "is_paired",
             "difference",
@@ -1683,6 +1807,15 @@ class PermutationTest:
     ps_adjust : bool, default False
         If True, the p-value is adjusted according to Phipson & Smyth (2010).
         # https://doi.org/10.2202/1544-6115.1585
+    control_clusters : array-like, default None
+    test_clusters : array-like, default None
+        The cluster (e.g. participant) that each observation in `control` and
+        `test` belongs to. When supplied, labels are reshuffled at the cluster
+        level: for paired data, control and test are swapped for whole clusters
+        at a time; for unpaired data with clusters nested within groups, whole
+        clusters are reassigned between the groups; and for unpaired data with
+        clusters spanning both groups, the group labels are reshuffled within
+        each cluster.
 
         
     Returns
@@ -1703,9 +1836,16 @@ class PermutationTest:
                  permutation_count:int=5000, # The number of permutations (reshuffles) to perform.
                  random_seed:int=12345,#`random_seed` is used to seed the random number generator during bootstrap resampling. This ensures that the generated permutations are replicable.
                  ps_adjust:bool=False,
+                 control_clusters=None, # Cluster label of each observation in `control`; see the class docstring.
+                 test_clusters=None, # Cluster label of each observation in `test`.
                  **kwargs):
         from ._stats_tools.effsize import two_group_difference
-        from ._stats_tools.confint_2group_diff import calculate_group_var
+        from ._stats_tools.confint_2group_diff import (
+            calculate_group_var,
+            cluster_codes,
+            cluster_tables,
+            expand_cluster_draw,
+        )
         
 
         self.__permutation_count = permutation_count
@@ -1713,6 +1853,12 @@ class PermutationTest:
         # Run Sanity Check.
         if is_paired and len(control) != len(test):
             raise ValueError("The two arrays do not have the same length.")
+
+        is_clustered = control_clusters is not None or test_clusters is not None
+        if is_clustered and (control_clusters is None or test_clusters is None):
+            err1 = "Both `control_clusters` and `test_clusters` must be supplied "
+            err2 = "for a cluster-aware permutation test."
+            raise ValueError(err1 + err2)
 
         # Initialise random number generator.
         # rng = random.default_rng(seed=random_seed)
@@ -1734,8 +1880,75 @@ class PermutationTest:
         self.__permutations = []
         self.__permutations_var = []
 
-        for i in range(int(self.__permutation_count)):
+        # The number of distinct (two-sided) permutations, used by the
+        # Phipson & Smyth (2010) adjustment.
+        if is_clustered:
+            (control_codes, test_codes), n_clusters = cluster_codes(control_clusters, test_clusters)
+            if len(control_codes) != CONTROL_LEN or len(test_codes) != TEST_LEN:
+                err1 = "`control_clusters` and `test_clusters` must have the same lengths "
+                err2 = "as `control` and `test` respectively."
+                raise ValueError(err1 + err2)
+
             if is_paired:
+                if not np.array_equal(control_codes, test_codes):
+                    err1 = "In a paired analysis every control observation must belong to the "
+                    err2 = "same cluster as the test observation it is paired with."
+                    raise ValueError(err1 + err2)
+                # Control and test are swapped for whole clusters at a time; each
+                # pattern of swaps and its mirror image give the same |effect size|.
+                totalPermutations = 2.0 ** n_clusters / 2
+            else:
+                bag_codes = array([*control_codes, *test_codes])
+                offsets, members = cluster_tables(bag_codes, n_clusters)
+                cluster_sizes = offsets[1:] - offsets[:-1]
+                control_per_cluster = np.bincount(control_codes, minlength=n_clusters)
+                clusters_shared = bool(
+                    ((control_per_cluster > 0) & (control_per_cluster < cluster_sizes)).any()
+                )
+
+                if clusters_shared:
+                    # Clusters contribute to both groups: the group labels are
+                    # reshuffled within each cluster. In the bag sorted by cluster,
+                    # the first `control_per_cluster[g]` slots of cluster g are
+                    # assigned to control.
+                    slot = arange(len(BAG)) - repeat(offsets[:-1], cluster_sizes)
+                    control_slot = slot < repeat(control_per_cluster, cluster_sizes)
+                    totalPermutations = float(
+                        np.prod([binomcoeff(n, k) for n, k in zip(cluster_sizes, control_per_cluster)])
+                    )
+                else:
+                    # Clusters are nested within groups: whole clusters are
+                    # reassigned between the control and test groups.
+                    n_control_clusters = int((control_per_cluster > 0).sum())
+                    if 2 * n_control_clusters == n_clusters:
+                        totalPermutations = binomcoeff(n_clusters, n_control_clusters) / 2
+                    else:
+                        totalPermutations = binomcoeff(n_clusters, n_control_clusters)
+        elif CONTROL_LEN == TEST_LEN:
+            totalPermutations = binomcoeff(CONTROL_LEN + TEST_LEN, TEST_LEN) / 2
+        else:
+            totalPermutations = binomcoeff(CONTROL_LEN + TEST_LEN, TEST_LEN)
+
+        for i in range(int(self.__permutation_count)):
+            if is_clustered and is_paired:
+                # Swap control and test for whole clusters at a time.
+                flip = rng.randint(0, 2, n_clusters).astype(bool)[control_codes]
+                control_sample = np.where(flip, test, control)
+                test_sample = np.where(flip, control, test)
+
+            elif is_clustered and clusters_shared:
+                # Reshuffle the group labels within each cluster.
+                order = np.lexsort((rng.random_sample(len(BAG)), bag_codes))
+                control_sample = BAG[order[control_slot]]
+                test_sample = BAG[order[~control_slot]]
+
+            elif is_clustered:
+                # Reassign whole clusters between the control and test groups.
+                perm = rng.permutation(n_clusters).astype(np.int64)
+                control_sample = BAG[expand_cluster_draw(perm[:n_control_clusters], offsets, members)]
+                test_sample = BAG[expand_cluster_draw(perm[n_control_clusters:], offsets, members)]
+
+            elif is_paired:
                 # Select which control-test pairs to swap.
                 random_idx = rng.choice(CONTROL_LEN,
                                 rng.randint(0, CONTROL_LEN+1),
@@ -1759,7 +1972,7 @@ class PermutationTest:
                                     False, effect_size)
             
             group_var = calculate_group_var(var(control_sample, ddof=1), 
-                                      CONTROL_LEN, 
+                                      len(control_sample), 
                                       var(test_sample, ddof=1), 
                                       len(test_sample))
             self.__permutations.append(es)
@@ -1775,11 +1988,6 @@ class PermutationTest:
             # as per R code in statmod::permp
             # https://rdrr.io/cran/statmod/src/R/permp.R
             # (assumes two-sided test)
-
-            if CONTROL_LEN == TEST_LEN:
-                totalPermutations = binomcoeff(CONTROL_LEN + TEST_LEN, TEST_LEN)/2
-            else:
-                totalPermutations = binomcoeff(CONTROL_LEN + TEST_LEN, TEST_LEN)
 
             if totalPermutations <= 10e3:
                 # use exact calculation

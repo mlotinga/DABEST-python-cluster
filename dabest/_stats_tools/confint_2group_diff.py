@@ -6,7 +6,9 @@ Docs: https://acclab.github.io/DABEST-python/API/confint_2group_diff.html.md"""
 
 # %% auto #0
 __all__ = ['create_jackknife_indexes', 'create_repeated_indexes', 'compute_meandiff_jackknife', 'bootstrap_indices',
-           'compute_bootstrapped_diff', 'delta2_bootstrap_loop', 'compute_delta2_bootstrapped_diff',
+           'compute_bootstrapped_diff', 'cluster_codes', 'cluster_tables', 'cluster_strata', 'cluster_bootstrap_draws',
+           'expand_cluster_draw', 'compute_cluster_jackknife', 'compute_cluster_bootstrapped_diff',
+           'delta2_cluster_bootstrap_loop', 'delta2_bootstrap_loop', 'compute_delta2_bootstrapped_diff',
            'compute_meandiff_bias_correction', 'compute_interval_limits', 'calculate_group_var',
            'calculate_bootstraps_var', 'calculate_weighted_delta']
 
@@ -162,6 +164,227 @@ def compute_bootstrapped_diff(
     return out
 
 
+def cluster_codes(*cluster_labels):
+    """
+    Convert cluster labels from one or more groups into contiguous integer codes.
+
+    The labels of all groups are pooled, so that the same label appearing in
+    several groups (e.g. a participant measured under every condition) maps
+    to the same code. Codes are assigned in order of first appearance.
+
+    Returns
+    -------
+    codes : list of int64 numpy arrays, one per input group.
+    n_clusters : int
+        The number of distinct clusters across all groups.
+    """
+    import pandas as pd
+
+    arrays = [np.asarray(a) for a in cluster_labels]
+    joined = np.concatenate(arrays) if len(arrays) > 1 else arrays[0]
+    codes, uniques = pd.factorize(pd.Series(joined), sort=False)
+    codes = codes.astype(np.int64)
+    if (codes < 0).any():
+        raise ValueError("Cluster labels must not contain missing values.")
+
+    out, start = [], 0
+    for a in arrays:
+        out.append(codes[start : start + len(a)])
+        start += len(a)
+    return out, len(uniques)
+
+
+def cluster_tables(codes, n_clusters):
+    """
+    Build the membership tables used by `expand_cluster_draw`.
+
+    Returns `(offsets, members)` such that `members[offsets[g]:offsets[g+1]]`
+    holds the positions (in the original array) of the observations that
+    belong to cluster `g`. A cluster absent from the array has an empty slice.
+    """
+    codes = np.asarray(codes, dtype=np.int64)
+    members = np.argsort(codes, kind="stable").astype(np.int64)
+    counts = np.bincount(codes, minlength=n_clusters)
+    offsets = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(counts))).astype(np.int64)
+    return offsets, members
+
+
+def cluster_strata(codes_per_group, n_clusters):
+    """
+    Partition the clusters into resampling strata.
+
+    Clusters are stratified by the pattern of groups in which they appear, so
+    that every bootstrap resample preserves the observed design. For a fully
+    within-cluster design (every cluster present in every group) there is a
+    single stratum and clusters are resampled jointly across the groups; for a
+    nested design (each cluster present in one group only) the clusters are
+    resampled separately within each group.
+
+    Returns `(strata_clusters, strata_offsets)`: the cluster codes concatenated
+    stratum by stratum, and the boundaries of each stratum in that array.
+    """
+    pattern = np.zeros(n_clusters, dtype=np.int64)
+    for k, codes in enumerate(codes_per_group):
+        present = np.zeros(n_clusters, dtype=bool)
+        present[np.asarray(codes, dtype=np.int64)] = True
+        pattern |= present.astype(np.int64) << k
+
+    strata_clusters = np.argsort(pattern, kind="stable").astype(np.int64)
+    _, counts = np.unique(pattern, return_counts=True)
+    strata_offsets = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(counts))).astype(np.int64)
+    return strata_clusters, strata_offsets
+
+
+@njit(cache=True) # parallelization must be turned off for random number generation
+def cluster_bootstrap_draws(strata_clusters, strata_offsets, resamples, random_seed):
+    """
+    Draw clusters with replacement, separately within each stratum
+    (see `cluster_strata`).
+
+    Returns an array of shape `(resamples, n_clusters)` holding, for each
+    resample, the codes of the clusters drawn.
+    """
+    np.random.seed(random_seed)
+    n_clusters = len(strata_clusters)
+    n_strata = len(strata_offsets) - 1
+    draws = np.empty((resamples, n_clusters), dtype=np.int64)
+
+    for i in range(resamples):
+        for s in range(n_strata):
+            start = strata_offsets[s]
+            size = strata_offsets[s + 1] - start
+            picks = np.random.choice(size, size)
+            for k in range(size):
+                draws[i, start + k] = strata_clusters[start + picks[k]]
+    return draws
+
+
+@njit(cache=True)
+def expand_cluster_draw(draw, offsets, members):
+    """
+    Expand a draw of cluster codes into the positions of all the observations
+    that belong to those clusters (see `cluster_tables`).
+    """
+    total = 0
+    for j in range(len(draw)):
+        g = draw[j]
+        total += offsets[g + 1] - offsets[g]
+
+    out = np.empty(total, dtype=np.int64)
+    pos = 0
+    for j in range(len(draw)):
+        g = draw[j]
+        for k in range(offsets[g], offsets[g + 1]):
+            out[pos] = members[k]
+            pos += 1
+    return out
+
+
+def _check_paired_clusters(c0, c1):
+    """Paired observations must share a cluster."""
+    if len(c0) != len(c1) or not np.array_equal(c0, c1):
+        err1 = "In a paired analysis every control observation must belong to the same cluster "
+        err2 = "as the test observation it is paired with. Check that the data are sorted so "
+        err3 = "that paired rows are aligned, and that each pair has a single cluster label."
+        raise ValueError(err1 + err2 + err3)
+
+
+def compute_cluster_jackknife(x0, x1, c0, c1, is_paired, effect_size):
+    """
+    Delete-one-cluster jackknife of the effect size for 2 groups.
+
+    Used to compute the acceleration term of the BCa interval when the
+    observations are clustered. `c0` and `c1` hold the cluster label of each
+    observation in `x0` and `x1`.
+    """
+    from . import effsize as __es
+
+    x0, x1 = np.asarray(x0), np.asarray(x1)
+    (c0, c1), n_clusters = cluster_codes(c0, c1)
+    if is_paired:
+        _check_paired_clusters(c0, c1)
+
+    out = []
+    for g in range(n_clusters):
+        keep0 = c0 != g
+        keep1 = c1 != g
+        if not keep0.any() or not keep1.any():
+            # Deleting this cluster would empty one of the groups.
+            continue
+        out.append(__es.two_group_difference(x0[keep0], x1[keep1], is_paired, effect_size))
+    return out
+
+
+def compute_cluster_bootstrapped_diff(
+    x0, x1, c0, c1, is_paired, effect_size, resamples=5000, random_seed=12345
+):
+    """
+    Cluster bootstrap of the effect size for 2 groups.
+
+    Instead of resampling individual observations (or pairs), whole clusters
+    of observations (e.g. all the observations contributed by one participant)
+    are resampled with replacement, so that the correlation between
+    observations from the same cluster is preserved in every resample.
+
+    `c0` and `c1` hold the cluster label of each observation in `x0` and `x1`;
+    a label present in both groups denotes the same cluster. In a paired
+    analysis the two label arrays must be identical, as the observations are
+    paired by position.
+
+    When every observation is its own cluster this reduces exactly to
+    `compute_bootstrapped_diff`.
+    """
+    from . import effsize as __es
+
+    x0, x1 = np.asarray(x0), np.asarray(x1)
+    (c0, c1), n_clusters = cluster_codes(c0, c1)
+    if is_paired:
+        _check_paired_clusters(c0, c1)
+
+    tables0 = cluster_tables(c0, n_clusters)
+    tables1 = cluster_tables(c1, n_clusters)
+    strata_clusters, strata_offsets = cluster_strata((c0, c1), n_clusters)
+    draws = cluster_bootstrap_draws(strata_clusters, strata_offsets, resamples, random_seed)
+
+    out = np.empty(resamples, dtype=np.float64)
+    for i in range(resamples):
+        idx0 = expand_cluster_draw(draws[i], *tables0)
+        idx1 = idx0 if is_paired else expand_cluster_draw(draws[i], *tables1)
+        out[i] = __es.two_group_difference(x0[idx0], x1[idx1], is_paired, effect_size)
+
+    return out
+
+
+def delta2_cluster_bootstrap_loop(
+    x1, x2, x3, x4, c1, c2, c3, c4, resamples, pooled_sd, rng_seed, is_paired, proportional=False
+):
+    """
+    Cluster-bootstrap counterpart of `delta2_bootstrap_loop`: whole clusters
+    are resampled with replacement, jointly across the four groups.
+    """
+    xs = [np.asarray(x) for x in (x1, x2, x3, x4)]
+    (c1, c2, c3, c4), n_clusters = cluster_codes(c1, c2, c3, c4)
+    if is_paired:
+        _check_paired_clusters(c1, c2)
+        _check_paired_clusters(c3, c4)
+
+    tables = [cluster_tables(c, n_clusters) for c in (c1, c2, c3, c4)]
+    strata_clusters, strata_offsets = cluster_strata((c1, c2, c3, c4), n_clusters)
+    draws = cluster_bootstrap_draws(strata_clusters, strata_offsets, resamples, rng_seed)
+
+    deltadelta = np.empty(resamples)
+    out_delta_g = np.empty(resamples)
+
+    for i in range(resamples):
+        means = [np.mean(x[expand_cluster_draw(draws[i], *t)]) for x, t in zip(xs, tables)]
+        delta_delta = (means[3] - means[2]) - (means[1] - means[0])
+
+        deltadelta[i] = delta_delta
+        out_delta_g[i] = delta_delta if proportional else delta_delta / pooled_sd
+
+    return out_delta_g, deltadelta
+
+
 @njit(cache=True)
 def delta2_bootstrap_loop(x1, x2, x3, x4, resamples, pooled_sd, rng_seed, is_paired, proportional=False):
     """
@@ -211,18 +434,29 @@ def compute_delta2_bootstrapped_diff(
     is_paired: str = None,
     resamples: int = 5000,
     random_seed: int = 12345,
-    proportional: bool = False
+    proportional: bool = False,
+    clusters=None,  # Optional: four array-likes with the cluster label of every observation in x1, x2, x3 and x4.
 ) -> tuple:
     """
-    Bootstraps the effect size deltas' g or proportional delta-delta
+    Bootstraps the effect size deltas' g or proportional delta-delta.
+
+    If `clusters` is supplied, whole clusters are resampled with replacement
+    (see `compute_cluster_bootstrapped_diff`) instead of individual observations.
     """
     x1, x2, x3, x4 = map(np.asarray, [x1, x2, x3, x4])
+
+    def _bootstrap_loop(pooled_sd, is_proportional):
+        if clusters is None:
+            return delta2_bootstrap_loop(
+                x1, x2, x3, x4, resamples, pooled_sd, random_seed, is_paired, proportional=is_proportional
+            )
+        return delta2_cluster_bootstrap_loop(
+            x1, x2, x3, x4, *clusters, resamples, pooled_sd, random_seed, is_paired, proportional=is_proportional
+        )
     
     if proportional:
         # For proportional data, pass 1.0 as dummy pooled_sd (won't be used)
-        out_delta_g, deltadelta = delta2_bootstrap_loop(
-            x1, x2, x3, x4, resamples, 1.0, random_seed, is_paired, proportional=True
-        )
+        out_delta_g, deltadelta = _bootstrap_loop(1.0, True)
         # For proportional data, delta_g is the empirical delta-delta
         delta_g = ((np.mean(x4) - np.mean(x3)) - (np.mean(x2) - np.mean(x1)))
     else:
@@ -241,9 +475,7 @@ def compute_delta2_bootstrapped_diff(
         if np.isnan(pooled_sample_sd) or pooled_sample_sd == 0:
             raise ValueError("Pooled sample standard deviation is NaN or zero.")
             
-        out_delta_g, deltadelta = delta2_bootstrap_loop(
-            x1, x2, x3, x4, resamples, pooled_sample_sd, random_seed, is_paired, proportional=False
-        )
+        out_delta_g, deltadelta = _bootstrap_loop(pooled_sample_sd, False)
         delta_g = ((np.mean(x4) - np.mean(x3)) - (np.mean(x2) - np.mean(x1))) / pooled_sample_sd
 
     return out_delta_g, delta_g, deltadelta
