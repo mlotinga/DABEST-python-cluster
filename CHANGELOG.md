@@ -7,6 +7,9 @@
 ### New Features
 1. **Cluster-aware bootstrap and permutation tests**: `dabest.load()` accepts a new `cluster_col` argument naming the column that identifies the independent sampling unit (cluster) each observation belongs to, such as a participant who contributes several observations or several pairs of paired observations. When it is set, the bootstrap resamples whole clusters with replacement (a cluster bootstrap, stratified by the pattern of groups each cluster appears in) and the permutation test reshuffles labels at the cluster level, so that confidence intervals and permutation p-values account for the correlation between observations from the same cluster. This works for unpaired data, for paired data (`paired` with `id_col`, where `id_col` identifies the pairs and `cluster_col` the units the pairs are nested in), for shared-control and multi-group `idx`, and for delta-delta and mini-meta analyses. The results table gains an `n_clusters` column and `TwoGroupsEffectSize`/`PermutationTest` accept `control_clusters`/`test_clusters` directly. The parametric and rank-based tests in `statistical_tests` are unchanged and still ignore clustering.
 
+### Documentation
+1. **Baseline error curve, explained**: the [Plot Aesthetics tutorial](nbs/tutorials/08-plot_aesthetics.ipynb) and the `show_baseline_ec` docstring now spell out what the baseline error curve (`show_baseline_ec=True`) actually computes, and call out that it is always an *unpaired* self-comparison of the control group, regardless of `paired`. This matters with `cluster_col`: paired real comparisons largely cancel between-cluster variation, but the always-unpaired baseline curve does not, so it can become much wider than the real contrasts once clustering is on. A worked example with and without `cluster_col` is included.
+
 ## v2025.10.20
 
 ### New Features

@@ -1582,10 +1582,22 @@ class EffectSizeDataFrame(object):
             {"linestyle": "-", "linewidth": 2, "zorder": -2, "color": 'dimgray', "alpha": 1}
         
 		show_baseline_ec : boolean, default False
-            Whether or not to display the baseline error curve. The baseline error curve
-            represents the distribution of the effect size when comparing the control
-            group to itself, providing a reference for the inherent variability or noise
-            in the data. When True, this curve is plotted alongside the main effect size
+            Whether or not to display the baseline error curve (bec). The bec is the
+            bootstrap distribution obtained by comparing the leftmost ("control") group
+            of each `idx` tuple to a resample of itself, so that its own difference is
+            0 and its spread shows the sampling noise inherent to that group alone. It
+            is always computed as an *unpaired* comparison, even when `paired` is set
+            for the main analysis, because it stands in for "no relationship between
+            the two sides of the comparison" rather than for the design actually used.
+            For a paired analysis this means the bec is not directly comparable in
+            scale to the real (paired) effect-size curves: pairing removes shared
+            between-subject variation from the real curves but not from the bec, and
+            when `cluster_col` is set this asymmetry is amplified, since the bec then
+            resamples whole clusters against an independent resample of themselves,
+            while the real paired curves largely cancel the between-cluster variation.
+            The bec can be much wider than the real curves in that case, and may need
+            its own `contrast_ylim`; see the Plot Aesthetics tutorial for an example.
+            When True, this curve is plotted alongside the main effect size
             distribution, allowing for a visual comparison of the observed effect against
             the baseline variability.
 

@@ -104,7 +104,10 @@ def load(
         identifies the pairs and `cluster_col` the units the pairs are nested
         in, and every pair must belong to a single cluster. The parametric and
         rank-based tests reported in `statistical_tests` do not account for
-        clustering.
+        clustering. Note that the baseline error curve shown by
+        `.plot(show_baseline_ec=True)` is always an unpaired comparison (see
+        that argument's docstring), so with `cluster_col` set it can become
+        much wider than a paired analysis's real effect-size curves.
 
     Returns
     -------
