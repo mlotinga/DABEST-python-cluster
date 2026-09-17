@@ -323,6 +323,27 @@ def test_cluster_permutation_test():
     assert 0 <= shared.pvalue <= 1
     assert len(shared.permutations_var) == 200
 
+    # Shared clusters are permuted by swapping each cluster's control and test
+    # sets as a whole. When the two sets of every cluster hold the same values,
+    # no swap can change the effect size, whereas reshuffling observations
+    # within clusters would.
+    values = np.array([1.0, 5.0, 2.0, 8.0, 3.0, 9.0])
+    sets = np.repeat([0, 1, 2], 2)
+    identical = PermutationTest(
+        values, values, "mean_diff", permutation_count=100,
+        control_clusters=sets, test_clusters=sets,
+    )
+    assert np.allclose(identical.permutations, 0.0)
+
+    # When every cluster's sets differ by a constant, the permutation effect
+    # sizes can only take the values produced by whole-set swaps.
+    shifted = PermutationTest(
+        values, values + 2.0, "mean_diff", permutation_count=100,
+        control_clusters=sets, test_clusters=sets,
+    )
+    allowed = {-2.0, -2 / 3, 2 / 3, 2.0}
+    assert all(any(np.isclose(v, a) for a in allowed) for v in shifted.permutations)
+
     # Unpaired with nested clusters, adjusted p-value.
     nested = PermutationTest(
         control, test, "mean_diff", permutation_count=200, ps_adjust=True,

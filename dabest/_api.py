@@ -95,7 +95,9 @@ def load(
         contributes several observations, or several pairs of paired
         observations. When supplied, the bootstrap resamples whole clusters
         with replacement (a cluster bootstrap) and the permutation test
-        reshuffles labels at the cluster level, so that the confidence
+        reshuffles labels at the cluster level (swapping the control and test
+        observations of whole clusters, or reassigning whole clusters between
+        groups when clusters are nested within groups), so that the confidence
         intervals and permutation p-values account for the correlation between
         observations from the same cluster. This works with both unpaired data
         and paired data (`paired` with `id_col`): for paired data, `id_col`

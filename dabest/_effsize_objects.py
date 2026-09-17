@@ -298,10 +298,16 @@ class TwoGroupsEffectSize(object):
             + "effect size (or greater),\nassuming the null hypothesis of "
             + "zero difference is true."
         )
-        pval_def2 = (
-            "\nFor each p-value, 5000 reshuffles of the "
-            + "control and test labels were performed."
-        )
+        if self.__is_clustered:
+            pval_def2 = (
+                "\nFor each p-value, 5000 reshuffles of the control and test labels "
+                + "were performed at the level of whole clusters."
+            )
+        else:
+            pval_def2 = (
+                "\nFor each p-value, 5000 reshuffles of the "
+                + "control and test labels were performed."
+            )
         pval_def = pval_def1 + pval_def2
 
         if show_resample_count and define_pval:
@@ -1659,6 +1665,9 @@ class EffectSizeDataFrame(object):
             "bca_high",
         ]
 
+        if "n_clusters" in results_df.columns:
+            default_cols.insert(default_cols.index("effect_size"), "n_clusters")
+
         cols_of_interest = default_cols + stats_columns
 
         return results_df[cols_of_interest]
@@ -1785,6 +1794,14 @@ class EffectSizeDataFrame(object):
         return self.__delta2
 
 # %% ../nbs/API/effsize_objects.ipynb #5d49f77f
+def _count_sign_patterns(n):
+    """The number of ways to swap or not swap each of `n` clusters, as a float."""
+    try:
+        return float(2 ** int(n))
+    except OverflowError:
+        return float("inf")
+
+
 class PermutationTest:
     """
     A class to compute and report permutation tests.
@@ -1814,8 +1831,10 @@ class PermutationTest:
         level: for paired data, control and test are swapped for whole clusters
         at a time; for unpaired data with clusters nested within groups, whole
         clusters are reassigned between the groups; and for unpaired data with
-        clusters spanning both groups, the group labels are reshuffled within
-        each cluster.
+        clusters spanning both groups, each cluster's control and test
+        observations are swapped as whole sets. In every case the observations
+        within a cluster are kept together, so that heterogeneity of the effect
+        between clusters is reflected in the null distribution.
 
         
     Returns
@@ -1896,7 +1915,7 @@ class PermutationTest:
                     raise ValueError(err1 + err2)
                 # Control and test are swapped for whole clusters at a time; each
                 # pattern of swaps and its mirror image give the same |effect size|.
-                totalPermutations = 2.0 ** n_clusters / 2
+                totalPermutations = _count_sign_patterns(n_clusters) / 2
             else:
                 bag_codes = array([*control_codes, *test_codes])
                 offsets, members = cluster_tables(bag_codes, n_clusters)
@@ -1907,15 +1926,18 @@ class PermutationTest:
                 )
 
                 if clusters_shared:
-                    # Clusters contribute to both groups: the group labels are
-                    # reshuffled within each cluster. In the bag sorted by cluster,
-                    # the first `control_per_cluster[g]` slots of cluster g are
-                    # assigned to control.
-                    slot = arange(len(BAG)) - repeat(offsets[:-1], cluster_sizes)
-                    control_slot = slot < repeat(control_per_cluster, cluster_sizes)
-                    totalPermutations = float(
-                        np.prod([binomcoeff(n, k) for n, k in zip(cluster_sizes, control_per_cluster)])
-                    )
+                    # Clusters contribute to both groups: a cluster's control and
+                    # test observations are swapped as whole sets (the analogue of
+                    # the paired sign flip). Clusters present in one group only
+                    # are left where they are.
+                    shared_cluster = (control_per_cluster > 0) & (control_per_cluster < cluster_sizes)
+                    n_shared = int(shared_cluster.sum())
+                    is_control = arange(len(BAG)) < CONTROL_LEN
+                    if n_shared == n_clusters:
+                        # Swapping every cluster mirrors the effect size exactly.
+                        totalPermutations = _count_sign_patterns(n_shared) / 2
+                    else:
+                        totalPermutations = _count_sign_patterns(n_shared)
                 else:
                     # Clusters are nested within groups: whole clusters are
                     # reassigned between the control and test groups.
@@ -1937,10 +1959,11 @@ class PermutationTest:
                 test_sample = np.where(flip, control, test)
 
             elif is_clustered and clusters_shared:
-                # Reshuffle the group labels within each cluster.
-                order = np.lexsort((rng.random_sample(len(BAG)), bag_codes))
-                control_sample = BAG[order[control_slot]]
-                test_sample = BAG[order[~control_slot]]
+                # Swap the control and test sets of randomly chosen shared clusters.
+                swap = rng.randint(0, 2, n_clusters).astype(bool) & shared_cluster
+                new_is_control = is_control ^ swap[bag_codes]
+                control_sample = BAG[new_is_control]
+                test_sample = BAG[~new_is_control]
 
             elif is_clustered:
                 # Reassign whole clusters between the control and test groups.
