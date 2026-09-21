@@ -9,6 +9,7 @@
 
 ### Documentation
 1. **Baseline error curve, explained**: the [Plot Aesthetics tutorial](nbs/tutorials/08-plot_aesthetics.ipynb) and the `show_baseline_ec` docstring now spell out what the baseline error curve (`show_baseline_ec=True`) actually computes, and call out that it is always an *unpaired* self-comparison of the control group, regardless of `paired`. This matters with `cluster_col`: paired real comparisons largely cancel between-cluster variation, but the always-unpaired baseline curve does not, so it can become much wider than the real contrasts once clustering is on. A worked example with and without `cluster_col` is included.
+2. **New tutorial: [Cluster-Robust Bootstrap for Repeated Measures](nbs/tutorials/11-cluster_robust_bootstrap.ipynb)**: a self-contained, simulation-based worked example of `cluster_col` for the common case of a participant contributing several sets of paired observations. Its central example is tuned so that the naive dummy-ID bootstrap's 95% interval excludes zero (p = 0.0026, conventionally "significant") while the cluster-aware interval for the identical data spans zero (p = 0.087, "not significant"), making the practical stakes of pseudoreplication concrete rather than abstract. A 200-dataset coverage simulation then shows this is systematic, not a fluke of one dataset: against a known true effect, the naive interval covers the truth only about 82% of the time, while the cluster-aware interval recovers to about 90%.
 
 ## v2025.10.20
 
