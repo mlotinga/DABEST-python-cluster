@@ -164,6 +164,14 @@ class DeltaDelta(object):
         self.__pct_low = sorted_delta_delta[pct_idx_low]
         self.__pct_high = sorted_delta_delta[pct_idx_high]
 
+        # For an expanded interval, keep the unexpanded limits too: plots draw
+        # them as the thick part of the interval.
+        self.__unexpanded = (None, None, None, None)
+        if self.__ci_expanded is not None:
+            self.__unexpanded = ci2g.unexpanded_interval_limits(
+                sorted_delta_delta, self.__bias_correction, self.__acceleration_value, ci
+            )
+
     def __permutation_test(self):
         """
         Perform a permutation test and obtain the permutation p-value
@@ -263,6 +271,9 @@ class DeltaDelta(object):
                         ]
         if self.__ci_expanded is not None:
             column_index.insert(column_index.index('ci') + 1, 'ci_expanded')
+            position = column_index.index('pct_interval_idx') + 1
+            column_index[position:position] = ['bca_low_unexpanded', 'bca_high_unexpanded',
+                                               'pct_low_unexpanded', 'pct_high_unexpanded']
         delta_delta_results_df['bootstraps_control'] = [delta_delta_results_df['bootstraps'][0][0]]
         delta_delta_results_df['bootstraps_test'] = [delta_delta_results_df['bootstraps'][0][1]]
         delta_delta_results_df['permutations_control'] = [delta_delta_results_df['permutations'][0][0]]
@@ -287,6 +298,38 @@ class DeltaDelta(object):
         small number of clusters. None if the interval was not expanded.
         """
         return self.__ci_expanded
+
+    @property
+    def bca_low_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the BCa lower
+        limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[0]
+
+    @property
+    def bca_high_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the BCa upper
+        limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[1]
+
+    @property
+    def pct_low_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the percentile
+        lower limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[2]
+
+    @property
+    def pct_high_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the percentile
+        upper limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[3]
 
     @property
     def alpha(self):
@@ -576,6 +619,14 @@ class MiniMetaDelta(object):
         self.__pct_interval_idx = (pct_idx_low, pct_idx_high)
         self.__pct_low          = sorted_weighted_deltas[pct_idx_low]
         self.__pct_high         = sorted_weighted_deltas[pct_idx_high]
+
+        # For an expanded interval, keep the unexpanded limits too: plots draw
+        # them as the thick part of the interval.
+        self.__unexpanded = (None, None, None, None)
+        if self.__ci_expanded is not None:
+            self.__unexpanded = ci2g.unexpanded_interval_limits(
+                sorted_weighted_deltas, self.__bias_correction, self.__acceleration_value, ci
+            )
         
     
 
@@ -699,6 +750,9 @@ class MiniMetaDelta(object):
                         'permutation_count', 'bias_correction', 'jackknives']
         if self.__ci_expanded is not None:
             column_index.insert(column_index.index('ci') + 1, 'ci_expanded')
+            position = column_index.index('pct_interval_idx') + 1
+            column_index[position:position] = ['bca_low_unexpanded', 'bca_high_unexpanded',
+                                               'pct_low_unexpanded', 'pct_high_unexpanded']
         mini_meta_delta_results_df = mini_meta_delta_results_df.reindex(columns=column_index)
         mini_meta_delta_results_df.rename(columns={'bootstraps': 'bootstraps_deltas'}, inplace=True)
 
@@ -721,6 +775,38 @@ class MiniMetaDelta(object):
         small number of clusters. None if the interval was not expanded.
         """
         return self.__ci_expanded
+
+    @property
+    def bca_low_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the BCa lower
+        limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[0]
+
+    @property
+    def bca_high_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the BCa upper
+        limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[1]
+
+    @property
+    def pct_low_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the percentile
+        lower limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[2]
+
+    @property
+    def pct_high_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the percentile
+        upper limit before expansion; None if the interval was not expanded.
+        """
+        return self.__unexpanded[3]
 
 
     @property

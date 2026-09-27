@@ -258,6 +258,17 @@ class TwoGroupsEffectSize(object):
         self.__pct_low = sorted_bootstraps[pct_idx_low]
         self.__pct_high = sorted_bootstraps[pct_idx_high]
 
+        # For an expanded interval, keep the unexpanded limits too: plots draw
+        # them as the thick part of the interval.
+        if self.__ci_expanded is not None:
+            (self.__bca_low_unexpanded, self.__bca_high_unexpanded,
+             self.__pct_low_unexpanded, self.__pct_high_unexpanded) = ci2g.unexpanded_interval_limits(
+                sorted_bootstraps, self.__bias_correction, self.__acceleration_value, self.__ci
+            )
+        else:
+            self.__bca_low_unexpanded = self.__bca_high_unexpanded = None
+            self.__pct_low_unexpanded = self.__pct_high_unexpanded = None
+
         self._get_bootstrap_baseline_ec()
 
         self._perform_statistical_test()
@@ -407,15 +418,16 @@ class TwoGroupsEffectSize(object):
             return None, None
         # In simulations, expanded intervals came close to nominal coverage once
         # there were at least 6 clusters in all, and at least 4 in the smallest
-        # group of clusters that sets the degrees of freedom.
+        # independently resampled group of clusters.
         n_total = sum(n for _, n in components if n >= 2)
-        if n_total < 6 or df + 1 < 4:
+        n_smallest = ci2g.smallest_cluster_group(components)
+        if n_total < 6 or n_smallest < 4:
             warnings.warn(
                 "Only {} clusters are available to resample ({} in the smallest group of "
                 "clusters); even after expansion for the small number of clusters, the "
                 "confidence interval is unreliable and likely too narrow. At least 6 "
                 "clusters, and at least 4 in every group of clusters, are "
-                "recommended.".format(int(n_total), int(df + 1))
+                "recommended.".format(int(n_total), int(n_smallest))
             )
         return ci_expanded, df
 
@@ -736,6 +748,15 @@ class TwoGroupsEffectSize(object):
         self.__bec_pct_low = sorted_bootstraps[pct_idx_low]
         self.__bec_pct_high = sorted_bootstraps[pct_idx_high]
 
+        if bec_ci_expanded is not None:
+            (self.__bec_bca_low_unexpanded, self.__bec_bca_high_unexpanded,
+             self.__bec_pct_low_unexpanded, self.__bec_pct_high_unexpanded) = ci2g.unexpanded_interval_limits(
+                sorted_bootstraps, bias_correction, acceleration_value, self.__ci
+            )
+        else:
+            self.__bec_bca_low_unexpanded = self.__bec_bca_high_unexpanded = None
+            self.__bec_pct_low_unexpanded = self.__bec_pct_high_unexpanded = None
+
     @property
     def difference(self):
         """
@@ -880,6 +901,38 @@ class TwoGroupsEffectSize(object):
         The percentile confidence interval lower limit.
         """
         return self.__pct_high
+
+    @property
+    def bca_low_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the BCa lower
+        limit before expansion; None if the interval was not expanded.
+        """
+        return self.__bca_low_unexpanded
+
+    @property
+    def bca_high_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the BCa upper
+        limit before expansion; None if the interval was not expanded.
+        """
+        return self.__bca_high_unexpanded
+
+    @property
+    def pct_low_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the percentile
+        lower limit before expansion; None if the interval was not expanded.
+        """
+        return self.__pct_low_unexpanded
+
+    @property
+    def pct_high_unexpanded(self):
+        """
+        For an interval expanded for a small number of clusters, the percentile
+        upper limit before expansion; None if the interval was not expanded.
+        """
+        return self.__pct_high_unexpanded
 
     @property
     def pvalue_brunner_munzel(self):
@@ -1068,6 +1121,38 @@ class TwoGroupsEffectSize(object):
         The percentile confidence interval lower limit for baseline error.
         """
         return self.__bec_pct_high
+
+    @property
+    def bec_bca_low_unexpanded(self):
+        """
+        The baseline error curve's BCa lower limit before expansion for a
+        small number of clusters; None if it was not expanded.
+        """
+        return self.__bec_bca_low_unexpanded
+
+    @property
+    def bec_bca_high_unexpanded(self):
+        """
+        The baseline error curve's BCa upper limit before expansion for a
+        small number of clusters; None if it was not expanded.
+        """
+        return self.__bec_bca_high_unexpanded
+
+    @property
+    def bec_pct_low_unexpanded(self):
+        """
+        The baseline error curve's percentile lower limit before expansion for
+        a small number of clusters; None if it was not expanded.
+        """
+        return self.__bec_pct_low_unexpanded
+
+    @property
+    def bec_pct_high_unexpanded(self):
+        """
+        The baseline error curve's percentile upper limit before expansion for
+        a small number of clusters; None if it was not expanded.
+        """
+        return self.__bec_pct_high_unexpanded
         
 
 # %% ../nbs/API/effsize_objects.ipynb #024b1d00
@@ -1254,6 +1339,10 @@ class EffectSizeDataFrame(object):
             "pct_low",
             "pct_high",
             "pct_interval_idx",
+            "bca_low_unexpanded",
+            "bca_high_unexpanded",
+            "pct_low_unexpanded",
+            "pct_high_unexpanded",
             "bootstraps",
             "resamples",
             "random_seed",
@@ -1286,6 +1375,10 @@ class EffectSizeDataFrame(object):
             "bec_pct_interval_idx",
             "bec_pct_low",
             "bec_pct_high",
+            "bec_bca_low_unexpanded",
+            "bec_bca_high_unexpanded",
+            "bec_pct_low_unexpanded",
+            "bec_pct_high_unexpanded",
         ]
         self.__results = out_.reindex(columns=columns_in_order)
         self.__results.dropna(axis="columns", how="all", inplace=True)
@@ -1493,6 +1586,7 @@ class EffectSizeDataFrame(object):
 
         contrast_marker_kwargs=None, # es_marker_kwargs=None, OLD
         contrast_errorbar_kwargs=None, # es_errorbar_kwargs=None, OLD
+        contrast_expanded_errorbar_kwargs=None,
 
         prop_sample_counts=False,
         prop_sample_counts_kwargs=None,
@@ -1729,6 +1823,16 @@ class EffectSizeDataFrame(object):
         contrast_errorbar_kwargs: dict, default None
             Pass relevant keyword arguments to the effectsize errorbar plotting. If none, the following keywords are passed:
             {'color': 'black', 'lw': 2, 'linestyle': '-', 'alpha': 1,'zorder': 1,}
+        contrast_expanded_errorbar_kwargs: dict, default None
+            When `cluster_col` is set, intervals are expanded for the number of
+            clusters (see `dabest.load`'s `cluster_ci_expansion`). The plotted
+            bootstrap distribution does not change, so the expanded interval
+            reaches further into its tails than its nominal `ci`% interval. To
+            show this, the unexpanded interval (the nominal `ci`% interval of
+            the plotted distribution) is drawn as the usual errorbar, and the
+            expansion beyond it as a thinner line. Pass keyword arguments here
+            to style the thinner line; by default it takes the errorbar's
+            keywords at 40% of its line width.
 
         prop_sample_counts: bool, default False
             Show the sample counts for each group in proportional plots

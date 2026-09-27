@@ -456,12 +456,15 @@ def test_cluster_permutation_test():
 # ---------------------------------------------------------------------------
 # Small-sample expansion of cluster-bootstrap intervals (`cluster_ci_expansion`)
 # ---------------------------------------------------------------------------
-def _hesterberg_level(n, ci=95):
-    """Hesterberg's (2015) expanded percentile level for a single sample of n units."""
+def _hesterberg_level(n, ci=95, df=None):
+    """
+    Hesterberg's (2015) expanded percentile level for a single sample of n units;
+    `df` replaces the n - 1 degrees of freedom of the t quantile.
+    """
     from scipy import stats
 
     alpha = (100 - ci) / 100
-    z = np.sqrt(n / (n - 1)) * stats.t.ppf(1 - alpha / 2, n - 1)
+    z = np.sqrt(n / (n - 1)) * stats.t.ppf(1 - alpha / 2, n - 1 if df is None else df)
     return 100 * (1 - 2 * stats.norm.sf(z))
 
 
@@ -480,26 +483,36 @@ def test_expanded_level_behaviour():
     assert all(a > b for a, b in zip(levels, levels[1:]))  # fewer clusters, more expansion
     assert levels[-1] > 95 and levels[-1] == pytest.approx(95, abs=0.05)
 
-    # Two equal, independently resampled strata: the conservative (Hsu) degrees of
-    # freedom are those of the smaller stratum, so the result equals one stratum's.
+    # Two equal, independently resampled strata: the Welch-Satterthwaite degrees
+    # of freedom pool both strata, so the expansion is smaller than for either alone.
     level, df = ci2g.expanded_ci_level(95, [(1.0, 8), (1.0, 8)])
-    assert df == 7
-    assert level == pytest.approx(_hesterberg_level(8))
+    assert df == pytest.approx(14)
+    assert level == pytest.approx(_hesterberg_level(8, df=14))
+    assert 95 < level < _hesterberg_level(8)
 
-    # Unequal strata: the smallest stratum that carries real variance sets the df.
+    # Unequal strata: the degrees of freedom are weighted by the variance shares.
     _, df = ci2g.expanded_ci_level(95, [(1.0, 5), (3.0, 20)])
-    assert df == 4
-    # A stratum carrying a negligible share of the variance does not set the df ...
+    assert df == pytest.approx(4 ** 2 / (1 / 4 + 3 ** 2 / 19))
+    # A stratum carrying a negligible share of the variance barely counts ...
     level_dominated, df = ci2g.expanded_ci_level(95, [(1.0, 40), (1e-9, 3)])
-    assert df == 39
+    assert df == pytest.approx(39)
     assert level_dominated == pytest.approx(_hesterberg_level(40), rel=1e-4)
-    # ... and the narrowness correction follows the variance shares.
+    # ... and a small stratum carrying most of it sets both corrections.
     level_dominated, df = ci2g.expanded_ci_level(95, [(1e-9, 40), (1.0, 6)])
-    assert df == 5
+    assert df == pytest.approx(5)
     assert level_dominated == pytest.approx(_hesterberg_level(6), rel=1e-4)
-    # Many equal strata, each below the 10% share threshold: still well defined.
+    # Many equal strata.
     level, df = ci2g.expanded_ci_level(95, [(1.0, 10)] * 12)
-    assert df == 9 and level == pytest.approx(_hesterberg_level(10))
+    assert df == pytest.approx(12 * 9) and level == pytest.approx(_hesterberg_level(10, df=108))
+
+    # Whatever the variances, the degrees of freedom lie between those of the
+    # smallest stratum and the pooled total.
+    rng = np.random.default_rng(3)
+    for _ in range(50):
+        sizes = rng.integers(2, 30, size=rng.integers(2, 5))
+        components = list(zip(rng.exponential(1, sizes.size), sizes))
+        _, df = ci2g.expanded_ci_level(95, components)
+        assert sizes.min() - 1 - 1e-9 <= df <= np.sum(sizes - 1) + 1e-9
 
     # Strata of a single cluster carry no information and are ignored.
     assert ci2g.expanded_ci_level(95, [(1.0, 1), (1.0, 10)])[0] == pytest.approx(_hesterberg_level(10))
@@ -507,7 +520,14 @@ def test_expanded_level_behaviour():
     assert ci2g.expanded_ci_level(95, []) == (95, None)
 
     # No usable variance information: strata are weighted equally.
-    assert ci2g.expanded_ci_level(95, [(0.0, 8), (0.0, 6)])[1] == 5
+    assert ci2g.expanded_ci_level(95, [(0.0, 8), (0.0, 6)])[1] == pytest.approx(4 / (1 / 7 + 1 / 5))
+
+    # The smallest group of clusters that carries a real share of the variance,
+    # used to warn about designs with too few clusters.
+    assert ci2g.smallest_cluster_group([(1.0, 5), (3.0, 20)]) == 5
+    assert ci2g.smallest_cluster_group([(1.0, 40), (1e-9, 3)]) == 40
+    assert ci2g.smallest_cluster_group([(1.0, 10)] * 12) == 10
+    assert ci2g.smallest_cluster_group([(1.0, 1)]) is None
 
     # Extreme expansion is floored so that quantile functions stay finite.
     level, _ = ci2g.expanded_ci_level(95, [(1.0, 2)])
@@ -613,8 +633,9 @@ def test_expansion_for_unpaired_nested_and_mixed_designs():
     first_half = df["ID"] < "P06"
     nested = df[(first_half & (df["Level"] == "L1")) | (~first_half & (df["Level"] == "L3"))]
     result = load(nested, idx=("L1", "L3"), cluster_col="ID", **kwargs).mean_diff.results.iloc[0]
-    # Two strata of 6: the expansion of a single sample of 6 clusters.
-    assert result["ci_expanded"] == pytest.approx(_hesterberg_level(6))
+    # Two strata of 6: the narrowness correction of 6 clusters, with between 5 and
+    # 10 degrees of freedom depending on how the variance divides between them.
+    assert _hesterberg_level(6, df=10) < result["ci_expanded"] < _hesterberg_level(6)
 
     # Mixed: a participant measured only in the test group adds a stratum of one,
     # which cannot be resampled and so does not change the expansion.
@@ -740,3 +761,128 @@ def test_expansion_for_every_effect_size_and_plot(clustered):
 
     assert clustered.mean_diff.plot(show_baseline_ec=True) is not None
     plt.close("all")
+
+
+def test_unexpanded_limits_are_reported_alongside_the_expanded_ones(clustered, naive):
+    expanded = clustered.mean_diff.results
+    unexpanded = load(DF, cluster_col="ID", cluster_ci_expansion=False, **PAIRED_KWARGS).mean_diff.results
+
+    # The unexpanded limits are the limits the interval would have without
+    # expansion, and lie inside the expanded interval.
+    for kind in ("bca", "pct", "bec_bca", "bec_pct"):
+        for side in ("low", "high"):
+            assert expanded[f"{kind}_{side}_unexpanded"].to_numpy() == pytest.approx(
+                unexpanded[f"{kind}_{side}"].to_numpy()), (kind, side)
+        assert (expanded[f"{kind}_low"] <= expanded[f"{kind}_low_unexpanded"]).all()
+        assert (expanded[f"{kind}_high_unexpanded"] <= expanded[f"{kind}_high"]).all()
+
+    # The same values are available on the effect size object.
+    control, test = DF["Level"] == "L1", DF["Level"] == "L2"
+    two_groups = TwoGroupsEffectSize(
+        DF.loc[control, "Y"].to_numpy(), DF.loc[test, "Y"].to_numpy(), "mean_diff",
+        is_paired="sequential", resamples=PAIRED_KWARGS["resamples"], permutation_count=10,
+        control_clusters=DF.loc[control, "ID"].to_numpy(), test_clusters=DF.loc[test, "ID"].to_numpy())
+    assert two_groups.bca_low <= two_groups.bca_low_unexpanded < two_groups.bca_high_unexpanded <= two_groups.bca_high
+    assert two_groups.pct_low <= two_groups.pct_low_unexpanded < two_groups.pct_high_unexpanded <= two_groups.pct_high
+
+    # Nothing to report when the interval is not expanded.
+    for results in (unexpanded, naive.mean_diff.results):
+        assert not any("unexpanded" in c for c in results.columns)
+
+    # Delta-delta and mini-meta.
+    df = DF[DF["Level"].isin(["L1", "L3"])].copy()
+    df["Env"] = np.where(df["pair"] % 4 < 2, "A", "B")
+    delta2_kwargs = dict(x=["Level", "Env"], y="Y", delta2=True, experiment="Env", paired="sequential",
+                         id_col="pair", cluster_col="ID", resamples=500)
+    mini_meta = load(df, idx=(("L1", "L3"),), x="Level", y="Y", mini_meta=True, paired="sequential",
+                     id_col="pair", cluster_col="ID", resamples=500)
+    for obj in (load(df, **delta2_kwargs).mean_diff.delta_delta, mini_meta.mean_diff.mini_meta):
+        assert obj.bca_low <= obj.bca_low_unexpanded < obj.bca_high_unexpanded <= obj.bca_high
+        assert obj.pct_low <= obj.pct_low_unexpanded < obj.pct_high_unexpanded <= obj.pct_high
+        assert {"bca_low_unexpanded", "pct_high_unexpanded"} <= set(obj.results.columns)
+    off = load(df, cluster_ci_expansion=False, **delta2_kwargs).mean_diff.delta_delta
+    assert off.bca_low_unexpanded is None
+    assert not any("unexpanded" in c for c in off.results.columns)
+
+
+def _ci_segments(ax, horizontal=False):
+    """(position, low, high, linewidth) of every straight line drawn along the effect size axis."""
+    segments = []
+    for line in ax.get_lines():
+        x = np.asarray(line.get_xdata(), dtype=float)
+        y = np.asarray(line.get_ydata(), dtype=float)
+        along, across = (y, x) if horizontal else (x, y)
+        if len(along) == 2 and along[0] == along[1] and across[0] != across[1]:
+            segments.append((along[0], across.min(), across.max(), line.get_linewidth()))
+    return sorted(segments)
+
+
+def test_plots_draw_the_expansion_as_a_thinner_line(clustered, naive):
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    matplotlib.use("Agg")
+    results = clustered.mean_diff.results
+
+    # At each contrast a thin line spans the expanded interval, and a thick bar
+    # the unexpanded interval, which the bootstrap distribution spans.
+    fig = clustered.mean_diff.plot()
+    segments = _ci_segments(fig.axes[1])
+    for j, row in enumerate(results.itertuples(), start=1):
+        at_j = [s for s in segments if s[0] == j]
+        assert len(at_j) == 2
+        thin, thick = sorted(at_j, key=lambda s: s[3])
+        assert thin[3] < thick[3]
+        assert (thin[1], thin[2]) == pytest.approx((row.bca_low, row.bca_high))
+        assert (thick[1], thick[2]) == pytest.approx((row.bca_low_unexpanded, row.bca_high_unexpanded))
+    plt.close("all")
+
+    # The percentile interval, horizontal plots and custom styling of the thin line.
+    fig = clustered.mean_diff.plot(ci_type="pct", horizontal=True,
+                                   contrast_expanded_errorbar_kwargs={"color": "red", "lw": 1.5})
+    ax = fig.axes[1]
+    thin = [line for line in ax.get_lines() if line.get_color() == "red"]
+    assert thin and all(line.get_linewidth() == 1.5 for line in thin)
+    thin = sorted(s for s in _ci_segments(ax, horizontal=True) if s[3] == 1.5)
+    assert [(lo, hi) for _, lo, hi, _ in thin] == pytest.approx(list(zip(results.pct_low, results.pct_high)))
+    plt.close("all")
+
+    # One whisker per contrast when the interval is not expanded.
+    opted_out = load(DF, cluster_col="ID", cluster_ci_expansion=False, **PAIRED_KWARGS)
+    for obj in (naive, opted_out):
+        segments = _ci_segments(obj.mean_diff.plot().axes[1])
+        assert len({s[3] for s in segments}) == 1
+        assert sorted(s[0] for s in segments) == [1.0, 2.0]
+        plt.close("all")
+
+    # The baseline error curve and delta-delta are drawn the same way.
+    fig = clustered.mean_diff.plot(show_baseline_ec=True)
+    assert len([s for s in _ci_segments(fig.axes[1]) if s[0] == 0]) == 2
+    plt.close("all")
+    df = DF[DF["Level"].isin(["L1", "L3"])].copy()
+    df["Env"] = np.where(df["pair"] % 4 < 2, "A", "B")
+    delta2 = load(df, x=["Level", "Env"], y="Y", delta2=True, experiment="Env", paired="sequential",
+                  id_col="pair", cluster_col="ID", resamples=500)
+    dd = delta2.mean_diff.delta_delta
+    drawn = [(lo, hi) for _, lo, hi, _ in _ci_segments(delta2.mean_diff.plot().axes[1])]
+    assert any((lo, hi) == pytest.approx((dd.bca_low, dd.bca_high)) for lo, hi in drawn)
+    assert any((lo, hi) == pytest.approx((dd.bca_low_unexpanded, dd.bca_high_unexpanded)) for lo, hi in drawn)
+    plt.close("all")
+
+
+def test_forest_plot_draws_the_expansion_as_a_thinner_line(clustered, naive):
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from dabest import forest_plot
+
+    matplotlib.use("Agg")
+    results = clustered.mean_diff.results.iloc[0]
+    for horizontal in (False, True):
+        fig = forest_plot([clustered, naive], idx=[[0], [0]], labels=["clustered", "naive"], horizontal=horizontal)
+        segments = _ci_segments(fig.axes[0], horizontal=horizontal)
+        at_1 = sorted((s for s in segments if s[0] == 1), key=lambda s: s[3])
+        assert len(at_1) == 2
+        assert (at_1[0][1], at_1[0][2]) == pytest.approx((results.bca_low, results.bca_high))
+        assert (at_1[1][1], at_1[1][2]) == pytest.approx((results.bca_low_unexpanded, results.bca_high_unexpanded))
+        assert len([s for s in segments if s[0] == 2]) == 1
+        plt.close("all")

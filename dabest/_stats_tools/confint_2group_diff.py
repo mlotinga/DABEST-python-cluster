@@ -8,10 +8,11 @@ Docs: https://acclab.github.io/DABEST-python/API/confint_2group_diff.html.md"""
 __all__ = ['create_jackknife_indexes', 'create_repeated_indexes', 'compute_meandiff_jackknife', 'bootstrap_indices',
            'compute_bootstrapped_diff', 'cluster_codes', 'cluster_tables', 'cluster_strata', 'cluster_bootstrap_draws',
            'expand_cluster_draw', 'compute_cluster_jackknife', 'cluster_jackknife_by_cluster',
-           'cluster_variance_components', 'expanded_ci_level', 'percentile_interval_idx', 'expanded_interval_limits',
-           'compute_cluster_bootstrapped_diff', 'delta2_cluster_bootstrap_loop', 'delta2_cluster_variance_components',
-           'delta2_bootstrap_loop', 'compute_delta2_bootstrapped_diff', 'compute_meandiff_bias_correction',
-           'compute_interval_limits', 'calculate_group_var', 'calculate_bootstraps_var', 'calculate_weighted_delta']
+           'cluster_variance_components', 'smallest_cluster_group', 'expanded_ci_level', 'percentile_interval_idx',
+           'unexpanded_interval_limits', 'expanded_interval_limits', 'compute_cluster_bootstrapped_diff',
+           'delta2_cluster_bootstrap_loop', 'delta2_cluster_variance_components', 'delta2_bootstrap_loop',
+           'compute_delta2_bootstrapped_diff', 'compute_meandiff_bias_correction', 'compute_interval_limits',
+           'calculate_group_var', 'calculate_bootstraps_var', 'calculate_weighted_delta']
 
 # %% ../../nbs/API/confint_2group_diff.ipynb #fa733643
 import numpy as np
@@ -365,10 +366,39 @@ def cluster_variance_components(jackknife_values, deleted_codes, codes_per_group
 # bootstrap resamples for any practical number of resamples.
 _MIN_EXPANDED_ALPHA = 1e-6
 
-# Strata carrying less than this share of the variance do not set the degrees
-# of freedom, so that a stray handful of clusters (say, two participants seen in
-# only one condition) cannot inflate the expansion.
-_MIN_VARIANCE_SHARE_FOR_DF = 0.1
+# Strata carrying less than this share of the variance are not counted when
+# judging whether the smallest group of clusters is too small for a reliable
+# interval (see `smallest_cluster_group`), so that a stray handful of clusters
+# (say, two participants seen in only one condition) does not trigger a warning.
+_MIN_VARIANCE_SHARE = 0.1
+
+
+def _usable_components(components):
+    """Strata with at least 2 clusters, as arrays of variances and sizes."""
+    components = [(v, n) for v, n in components if n >= 2]
+    if not components:
+        return None, None
+    variances = np.array([v for v, _ in components], dtype=float)
+    n = np.array([n for _, n in components], dtype=float)
+    if not np.all(np.isfinite(variances)) or variances.sum() <= 0:
+        # No usable variance information: weight the strata equally.
+        variances = np.ones_like(n)
+    return variances, n
+
+
+def smallest_cluster_group(components):
+    """
+    The number of clusters in the smallest stratum that carries at least 10%
+    of the variance (see `cluster_variance_components`); None if no stratum
+    has at least 2 clusters.
+    """
+    variances, n = _usable_components(components)
+    if n is None:
+        return None
+    shares = variances / variances.sum()
+    # Never let the threshold exclude every stratum (e.g. many equal strata).
+    threshold = min(_MIN_VARIANCE_SHARE, shares.max())
+    return int(n[shares >= threshold].min())
 
 
 def expanded_ci_level(ci, components):
@@ -389,33 +419,26 @@ def expanded_ci_level(ci, components):
     clusters nested within groups), `components` holds each stratum's
     `(variance, n)` (see `cluster_variance_components`). The narrowness
     correction is then applied stratum by stratum, weighted by each stratum's
-    share of the variance, and the degrees of freedom are those of the
-    smallest stratum carrying at least 10% of the variance. This is the
-    conservative (Hsu) alternative to the Welch-Satterthwaite approximation,
-    which in simulations under-covered for unbalanced and mixed designs. Both
-    reduce to the single-sample correction above for one stratum.
+    share of the variance, and the degrees of freedom come from the
+    Welch-Satterthwaite approximation. Both reduce to the single-sample
+    correction above for one stratum. In simulations of unbalanced or mixed
+    designs whose smallest group held only 4 to 6 clusters, Welch-Satterthwaite
+    intervals covered 1 to 3 points below nominal; the more conservative
+    alternative of the smallest stratum's degrees of freedom over-covered by
+    similar amounts, with intervals about 10% wider.
 
     Returns `(ci_expanded, df)`, or `(ci, None)` if no stratum has at least
     2 clusters, in which case no expansion is possible.
     """
     from scipy.stats import t as student_t
 
-    components = [(v, n) for v, n in components if n >= 2]
-    if not components:
+    variances, n = _usable_components(components)
+    if n is None:
         return ci, None
-
-    variances = np.array([v for v, _ in components], dtype=float)
-    n = np.array([n for _, n in components], dtype=float)
-    if not np.all(np.isfinite(variances)) or variances.sum() <= 0:
-        # No usable variance information: weight the strata equally.
-        variances = np.ones_like(n)
 
     total = variances.sum()
     narrowness = np.sqrt(total / np.sum(variances * (n - 1) / n))
-    shares = variances / total
-    # Never let the threshold exclude every stratum (e.g. many equal strata).
-    threshold = min(_MIN_VARIANCE_SHARE_FOR_DF, shares.max())
-    df = float(n[shares >= threshold].min() - 1)
+    df = float(total ** 2 / np.sum(variances ** 2 / (n - 1)))
 
     alpha = _compute_alpha_from_ci(ci)
     z = narrowness * student_t.ppf(1 - alpha / 2, df)
@@ -432,6 +455,26 @@ def percentile_interval_idx(ci, n_boots):
     low = int((alpha / 2) * n_boots)
     high = int((1 - alpha / 2) * n_boots)
     return min(max(low, 0), n_boots - 1), min(max(high, 0), n_boots - 1)
+
+
+def unexpanded_interval_limits(sorted_bootstraps, bias, acceleration, ci):
+    """
+    The BCa and percentile limits at the nominal level `ci`, as
+    `(bca_low, bca_high, pct_low, pct_high)`, for an interval that has been
+    expanded for a small number of clusters. Plots show this unexpanded
+    interval, which the bootstrap distribution itself spans, as the thick part
+    of the interval, and the expansion beyond it as a thinner line. If the BCa
+    limits cannot be computed, the percentile limits are used for both.
+    """
+    n_boots = len(sorted_bootstraps)
+    pct_low, pct_high = percentile_interval_idx(ci, n_boots)
+    low, high = compute_interval_limits(bias, acceleration, n_boots, ci)
+    if isnan(low) or isnan(high):
+        low, high = pct_low, pct_high
+    else:
+        low, high = min(max(low, 0), n_boots - 1), min(max(high, 0), n_boots - 1)
+    return (sorted_bootstraps[low], sorted_bootstraps[high],
+            sorted_bootstraps[pct_low], sorted_bootstraps[pct_high])
 
 
 def expanded_interval_limits(bias, acceleration, n_boots, ci_expanded):

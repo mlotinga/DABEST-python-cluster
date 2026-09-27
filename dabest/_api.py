@@ -122,16 +122,22 @@ def load(
         bootstrap distribution, at a level derived from a t distribution with
         degrees of freedom based on the number of clusters. When clusters are
         nested within groups, or some clusters appear in only some groups, the
-        conservative choice of the smallest group of clusters' degrees of
-        freedom is used. The reported confidence level (`ci`) is unchanged; the
-        level actually read is reported as `ci_expanded` in the results. The
+        groups of clusters are resampled independently, and their degrees of
+        freedom are combined with the Welch-Satterthwaite approximation. The
+        reported confidence level (`ci`) is unchanged; the level actually read
+        is reported as `ci_expanded` in the results, alongside the unexpanded
+        limits (`bca_low_unexpanded` and so on). Plots draw the unexpanded
+        interval (the nominal `ci`% interval of the plotted bootstrap
+        distribution) as the usual thick bar, and the expansion beyond it as a
+        thinner line (see `contrast_expanded_errorbar_kwargs` in `plot()`). The
         correction fades as the number of clusters grows. In simulations the
-        expanded intervals came close to nominal coverage for every effect size
-        once there were at least 6 clusters in all and at least 4 in each
-        independently resampled group of clusters (for example 6 participants
-        who each take part in every condition, or 8 participants split between
-        two conditions); with fewer, no bootstrap interval is reliable, and a
-        warning is given. Because expanded intervals are read further into the
+        expanded intervals came within about 3 percentage points of nominal
+        coverage for every effect size once there were at least 6 clusters in
+        all and at least 4 in each independently resampled group of clusters
+        (for example 6 participants who each take part in every condition, or
+        8 participants split between two conditions); with fewer, no bootstrap
+        interval is reliable, and a warning is given. Because expanded
+        intervals are read further into the
         tails of the bootstrap distribution, consider increasing `resamples`
         (to 20000, say) when there are few clusters. Set to False to report
         unexpanded cluster-bootstrap intervals.
