@@ -180,7 +180,8 @@ def effectsize_df_plotter(effectsize_df: object, **plot_kwargs) -> matplotlib.fi
                                                             yvar = yvar,
                                                             horizontal = horizontal,
                                                             show_table = table_kwargs['show'],
-                                                            color_col = color_col
+                                                            color_col = color_col,
+                                                            two_col_sankey = two_col_sankey,
     )
     
     # Plotting the rawdata.
@@ -314,13 +315,14 @@ def effectsize_df_plotter(effectsize_df: object, **plot_kwargs) -> matplotlib.fi
     # Add the counts to the rawdata axes xticks.
     if show_sample_size:
         add_counts_to_ticks(
-                plot_data = plot_data, 
-                xvar = xvar, 
-                yvar = yvar, 
-                rawdata_axes = rawdata_axes, 
+                plot_data = plot_data,
+                xvar = xvar,
+                yvar = yvar,
+                rawdata_axes = rawdata_axes,
                 plot_kwargs = plot_kwargs,
                 flow = sankey_kwargs["flow"],
                 horizontal = horizontal,
+                cluster_col = dabest_obj.cluster_col,
         )
 
     # Add counts to prop plots (embedded in the plot bars)

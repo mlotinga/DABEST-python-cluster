@@ -1430,6 +1430,13 @@ class EffectSizeDataFrame(object):
             observations.
         show_sample_size : boolean, default True
             Whether or not to display the sample size of each group in the axis label.
+            When `cluster_col` was set in `dabest.load()`, the label also reports the
+            number of distinct clusters in that group, on its own line, since that is
+            the count the cluster-aware bootstrap actually resamples: `(N=<observations>,
+            n=<clusters>)` instead of the usual `(N=<observations>)`. For vertical
+            Cumming plots, including two-column Sankey plots, the gap between the
+            raw-data and contrast axes is then sized to the labels, so they clear the
+            contrast axes.
         show_delta2, show_mini_meta : boolean, default True
             If delta-delta or mini-meta delta is calculated, whether or not to
             show the delta-delta plot or mini-meta plot.

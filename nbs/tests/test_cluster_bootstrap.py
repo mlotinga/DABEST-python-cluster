@@ -244,6 +244,107 @@ def test_other_effect_sizes_and_plot_with_clusters(clustered):
     assert fig is not None
 
 
+def test_plot_tick_labels_report_cluster_count(naive, clustered):
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    naive_labels = [t.get_text() for t in naive.mean_diff.plot().axes[0].get_xticklabels()]
+    for label in naive_labels:
+        assert "n=" not in label
+        assert "(N=" in label
+
+    clustered_labels = [t.get_text() for t in clustered.mean_diff.plot().axes[0].get_xticklabels()]
+    for label in clustered_labels:
+        assert "(N=48,\n n=12)" in label  # 12 participants x 4 sets each = 48 observations per level
+
+    # A design where each participant contributes several sets: the cluster
+    # count in the label must be lower than the observation count.
+    df = make_clustered_data(n_participants=6, n_sets=5)
+    clustered_multi = load(
+        df, idx=("L1", "L2", "L3"), x="Level", y="Y", paired="sequential",
+        id_col="pair", cluster_col="ID", resamples=200, random_seed=1,
+    )
+    labels = [t.get_text() for t in clustered_multi.mean_diff.plot().axes[0].get_xticklabels()]
+    for label in labels:
+        assert "(N=30,\n n=6)" in label
+
+    # Horizontal orientation keeps the group label and N on one line, but still
+    # breaks N and n onto separate lines.
+    horiz_labels = [t.get_text() for t in clustered.mean_diff.plot(horizontal=True).axes[0].get_yticklabels()]
+    for label in horiz_labels:
+        assert " (N=48,\n n=12)" in label
+
+
+def test_cumming_layout_makes_room_for_cluster_label(naive, clustered):
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    matplotlib.use("Agg")
+
+    def gap(fig):
+        raw, contrast = fig.axes[0].get_position(), fig.axes[1].get_position()
+        return raw.y0 - contrast.y1
+
+    # Figures created by dabest.
+    naive_gap = gap(naive.mean_diff.plot(float_contrast=False))
+    clustered_gap = gap(clustered.mean_diff.plot(float_contrast=False))
+    assert clustered_gap > naive_gap
+
+    # Figures drawn into a user-supplied axes (the contrast axes is an inset).
+    def inset_gap(dabest_obj):
+        f, ax = plt.subplots()
+        dabest_obj.mean_diff.plot(ax=ax, float_contrast=False)
+        raw = ax.get_position()
+        contrast = ax.contrast_axes.get_position()
+        return raw.y0 - contrast.y1
+
+    assert inset_gap(clustered) > inset_gap(naive)
+
+    # Without sample-size labels there is nothing extra to make room for.
+    assert gap(clustered.mean_diff.plot(float_contrast=False, show_sample_size=False)) == pytest.approx(naive_gap)
+    plt.close("all")
+
+
+def _label_clearance(raw_ax, contrast_ax):
+    """Pixels between the lowest raw-data tick label and the top of the contrast axes."""
+    fig = raw_ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    labels = [t for t in raw_ax.get_xticklabels() if t.get_text()]
+    label_bottom = min(t.get_window_extent(renderer).y0 for t in labels)
+    return label_bottom - contrast_ax.get_window_extent(renderer).y1
+
+
+def test_cluster_labels_clear_the_contrast_axes():
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    matplotlib.use("Agg")
+    rng = np.random.default_rng(0)
+    df = DF.copy()
+    df["Yes"] = (rng.random(len(df)) < 0.4).astype(int)
+    proportional_kwargs = dict(idx=("L1", "L2", "L3"), x="Level", y="Yes", proportional=True,
+                               paired="sequential", id_col="pair", cluster_col="ID", resamples=200)
+
+    cases = [
+        (load(DF, cluster_col="ID", **PAIRED_KWARGS), dict(fig_size=(5, 4))),
+        (load(DF, cluster_col="ID", **PAIRED_KWARGS), dict(fontsize_rawxlabel=16)),
+        # Two-column Sankey labels span four lines before the cluster count is added.
+        (load(df, **proportional_kwargs), dict(sankey_kwargs={"flow": False})),
+        (load(df, **proportional_kwargs), dict(sankey_kwargs={"flow": False}, fig_size=(5, 4))),
+    ]
+    for dabest_obj, plot_kwargs in cases:
+        fig = dabest_obj.mean_diff.plot(**plot_kwargs)
+        assert _label_clearance(fig.axes[0], fig.axes[1]) > 0, plot_kwargs
+
+        user_kwargs = {k: v for k, v in plot_kwargs.items() if k != "fig_size"}
+        f, ax = plt.subplots(figsize=(5.5, 5))
+        dabest_obj.mean_diff.plot(ax=ax, **user_kwargs)
+        assert _label_clearance(ax, ax.contrast_axes) > 0, user_kwargs
+        plt.close("all")
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
