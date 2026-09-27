@@ -451,3 +451,292 @@ def test_cluster_permutation_test():
         control_clusters=clusters, test_clusters=clusters + 10,
     )
     assert 0 <= nested.pvalue <= 1
+
+
+# ---------------------------------------------------------------------------
+# Small-sample expansion of cluster-bootstrap intervals (`cluster_ci_expansion`)
+# ---------------------------------------------------------------------------
+def _hesterberg_level(n, ci=95):
+    """Hesterberg's (2015) expanded percentile level for a single sample of n units."""
+    from scipy import stats
+
+    alpha = (100 - ci) / 100
+    z = np.sqrt(n / (n - 1)) * stats.t.ppf(1 - alpha / 2, n - 1)
+    return 100 * (1 - 2 * stats.norm.sf(z))
+
+
+def test_expanded_level_matches_hesterberg_for_one_stratum():
+    for n in (3, 5, 8, 15, 30, 200):
+        level, df = ci2g.expanded_ci_level(95, [(0.37, n)])
+        assert level == pytest.approx(_hesterberg_level(n))
+        assert df == pytest.approx(n - 1)
+    # Any confidence level, and the result does not depend on the variance scale.
+    assert ci2g.expanded_ci_level(90, [(5.0, 12)])[0] == pytest.approx(_hesterberg_level(12, ci=90))
+    assert ci2g.expanded_ci_level(95, [(1e-9, 12)])[0] == pytest.approx(_hesterberg_level(12))
+
+
+def test_expanded_level_behaviour():
+    levels = [ci2g.expanded_ci_level(95, [(1.0, n)])[0] for n in (4, 8, 16, 32, 64, 1000)]
+    assert all(a > b for a, b in zip(levels, levels[1:]))  # fewer clusters, more expansion
+    assert levels[-1] > 95 and levels[-1] == pytest.approx(95, abs=0.05)
+
+    # Two equal, independently resampled strata: the conservative (Hsu) degrees of
+    # freedom are those of the smaller stratum, so the result equals one stratum's.
+    level, df = ci2g.expanded_ci_level(95, [(1.0, 8), (1.0, 8)])
+    assert df == 7
+    assert level == pytest.approx(_hesterberg_level(8))
+
+    # Unequal strata: the smallest stratum that carries real variance sets the df.
+    _, df = ci2g.expanded_ci_level(95, [(1.0, 5), (3.0, 20)])
+    assert df == 4
+    # A stratum carrying a negligible share of the variance does not set the df ...
+    level_dominated, df = ci2g.expanded_ci_level(95, [(1.0, 40), (1e-9, 3)])
+    assert df == 39
+    assert level_dominated == pytest.approx(_hesterberg_level(40), rel=1e-4)
+    # ... and the narrowness correction follows the variance shares.
+    level_dominated, df = ci2g.expanded_ci_level(95, [(1e-9, 40), (1.0, 6)])
+    assert df == 5
+    assert level_dominated == pytest.approx(_hesterberg_level(6), rel=1e-4)
+    # Many equal strata, each below the 10% share threshold: still well defined.
+    level, df = ci2g.expanded_ci_level(95, [(1.0, 10)] * 12)
+    assert df == 9 and level == pytest.approx(_hesterberg_level(10))
+
+    # Strata of a single cluster carry no information and are ignored.
+    assert ci2g.expanded_ci_level(95, [(1.0, 1), (1.0, 10)])[0] == pytest.approx(_hesterberg_level(10))
+    assert ci2g.expanded_ci_level(95, [(1.0, 1)]) == (95, None)
+    assert ci2g.expanded_ci_level(95, []) == (95, None)
+
+    # No usable variance information: strata are weighted equally.
+    assert ci2g.expanded_ci_level(95, [(0.0, 8), (0.0, 6)])[1] == 5
+
+    # Extreme expansion is floored so that quantile functions stay finite.
+    level, _ = ci2g.expanded_ci_level(95, [(1.0, 2)])
+    assert 100 - level == pytest.approx(100 * ci2g._MIN_EXPANDED_ALPHA)
+
+
+def test_cluster_variance_components_follow_the_strata():
+    x = np.arange(12, dtype=float)
+    y = x + np.linspace(0, 1, 12)
+
+    # Paired: one stratum holding every cluster.
+    clusters = np.repeat(np.arange(4), 3)
+    values, deleted, codes, n = ci2g.cluster_jackknife_by_cluster(x, y, clusters, clusters, "baseline", "mean_diff")
+    components = ci2g.cluster_variance_components(values, deleted, codes, n)
+    assert [n_s for _, n_s in components] == [4]
+    assert components[0][0] > 0
+
+    # Nested: one stratum per group.
+    values, deleted, codes, n = ci2g.cluster_jackknife_by_cluster(
+        x[:6], y[6:], np.repeat([0, 1, 2], 2), np.repeat([5, 6, 7], 2), None, "mean_diff")
+    assert sorted(n_s for _, n_s in ci2g.cluster_variance_components(values, deleted, codes, n)) == [3, 3]
+
+    # Mixed: clusters in both groups, and single-group clusters; a stratum of one
+    # cluster is left out.
+    c0 = np.array([0, 0, 1, 1, 2, 2, 3])
+    c1 = np.array([0, 0, 1, 1, 2, 2, 4, 4])
+    values, deleted, codes, n = ci2g.cluster_jackknife_by_cluster(x[:7], y[:8], c0, c1, None, "mean_diff")
+    assert sorted(n_s for _, n_s in ci2g.cluster_variance_components(values, deleted, codes, n)) == [3]
+
+    # The delta-delta counterpart.
+    comps = ci2g.delta2_cluster_variance_components(x, y, x + 1, y + 2, clusters, clusters, clusters, clusters, "baseline")
+    assert [n_s for _, n_s in comps] == [4]
+
+
+def test_interval_index_helpers():
+    assert ci2g.percentile_interval_idx(95, 1000) == (25, 975)
+    assert ci2g.percentile_interval_idx(99.9999999999, 10) == (0, 9)
+
+    # BCa at an expanded level: valid indexes, within the array.
+    low, high = ci2g.expanded_interval_limits(0.05, 0.02, 1000, 98.0)
+    assert 0 <= low < high <= 999
+    # Undefined when a large acceleration meets an extreme level.
+    low, high = ci2g.expanded_interval_limits(0.0, 0.5, 1000, 99.99)
+    assert np.isnan(low) and np.isnan(high)
+    low, high = ci2g.expanded_interval_limits(np.inf, 0.0, 1000, 98.0)
+    assert np.isnan(low) and np.isnan(high)
+
+
+def test_expansion_is_on_by_default_and_can_be_turned_off(clustered):
+    expanded = clustered.mean_diff.results
+    unexpanded = load(DF, cluster_col="ID", cluster_ci_expansion=False, **PAIRED_KWARGS).mean_diff.results
+
+    # 12 participants, all present in every group: a single stratum.
+    assert expanded["ci_expanded"].to_numpy() == pytest.approx(_hesterberg_level(12))
+    assert (expanded["ci"] == 95).all()
+    assert "ci_expanded" not in unexpanded.columns
+
+    # Same point estimates and bootstrap distributions; only where they are read changes.
+    assert expanded["difference"].to_numpy() == pytest.approx(unexpanded["difference"].to_numpy())
+    for boot_on, boot_off in zip(expanded["bootstraps"], unexpanded["bootstraps"]):
+        assert np.array_equal(boot_on, boot_off)
+
+    for kind in ("bca", "pct", "bec_bca", "bec_pct"):
+        width_on = expanded[f"{kind}_high"] - expanded[f"{kind}_low"]
+        width_off = unexpanded[f"{kind}_high"] - unexpanded[f"{kind}_low"]
+        assert (width_on > width_off).all(), kind
+
+    # The percentile limits are the bootstrap quantiles at the reported levels.
+    resamples = PAIRED_KWARGS["resamples"]
+    for row_on, row_off in zip(expanded.itertuples(), unexpanded.itertuples()):
+        on, off = np.sort(row_on.bootstraps), np.sort(row_off.bootstraps)
+        a = (100 - row_on.ci_expanded) / 200
+        assert row_on.pct_low == on[int(a * resamples)]
+        assert row_on.pct_high == on[int((1 - a) * resamples)]
+        assert row_off.pct_low == off[int(0.025 * resamples)]
+        assert row_off.pct_high == off[int(0.975 * resamples)]
+
+    assert "ci_expanded" in clustered.mean_diff.statistical_tests.columns
+    assert "read at the" in repr(clustered.mean_diff)
+    assert "cluster_ci_expansion=False" in repr(clustered)
+    unexpanded_repr = repr(load(DF, cluster_col="ID", cluster_ci_expansion=False, **PAIRED_KWARGS).mean_diff)
+    assert "read at the" not in unexpanded_repr
+
+
+def test_unclustered_results_are_unaffected(naive):
+    results = naive.mean_diff.results
+    assert "ci_expanded" not in results.columns
+    resamples = PAIRED_KWARGS["resamples"]
+    for row in results.itertuples():
+        boot = np.sort(row.bootstraps)
+        assert row.pct_low == boot[int(0.025 * resamples)]
+        assert row.pct_high == boot[int(0.975 * resamples)]
+    # The switch only concerns clustered data.
+    with_switch = load(DF, cluster_ci_expansion=False, **PAIRED_KWARGS).mean_diff.results
+    assert with_switch["bca_low"].to_numpy() == pytest.approx(results["bca_low"].to_numpy())
+    assert "Confidence intervals will be expanded" not in repr(naive)
+
+
+def test_expansion_for_unpaired_nested_and_mixed_designs():
+    kwargs = dict(x="Level", y="Y", resamples=500, random_seed=4)
+    # Nested: participants P00-P05 at L1 only, P06-P11 at L3 only (two strata of 6).
+    df = DF[DF["Level"].isin(["L1", "L3"])]
+    first_half = df["ID"] < "P06"
+    nested = df[(first_half & (df["Level"] == "L1")) | (~first_half & (df["Level"] == "L3"))]
+    result = load(nested, idx=("L1", "L3"), cluster_col="ID", **kwargs).mean_diff.results.iloc[0]
+    # Two strata of 6: the expansion of a single sample of 6 clusters.
+    assert result["ci_expanded"] == pytest.approx(_hesterberg_level(6))
+
+    # Mixed: a participant measured only in the test group adds a stratum of one,
+    # which cannot be resampled and so does not change the expansion.
+    extra = pd.DataFrame({"ID": ["P99"] * 4, "pair": range(900, 904), "Level": "L3", "Y": [5.0, 6.0, 7.0, 5.5]})
+    shared = DF[DF["Level"].isin(["L1", "L3"])]
+    base = load(shared, idx=("L1", "L3"), cluster_col="ID", **kwargs).mean_diff.results.iloc[0]
+    mixed = load(pd.concat([shared, extra]), idx=("L1", "L3"), cluster_col="ID", **kwargs).mean_diff.results.iloc[0]
+    assert mixed["ci_expanded"] == pytest.approx(base["ci_expanded"])
+
+
+def test_expansion_for_delta2_and_mini_meta():
+    df = DF[DF["Level"].isin(["L1", "L3"])].copy()
+    df["Env"] = np.where(df["pair"] % 4 < 2, "A", "B")
+    delta2_kwargs = dict(x=["Level", "Env"], y="Y", delta2=True, experiment="Env",
+                         paired="sequential", id_col="pair", cluster_col="ID", resamples=500)
+    mini_meta_kwargs = dict(idx=(("L1", "L3"),), x="Level", y="Y", mini_meta=True,
+                            paired="sequential", id_col="pair", cluster_col="ID", resamples=500)
+
+    for effect_size in ("mean_diff", "hedges_g"):
+        on = getattr(load(df, **delta2_kwargs), effect_size).delta_delta
+        off = getattr(load(df, cluster_ci_expansion=False, **delta2_kwargs), effect_size).delta_delta
+        # Every participant contributes to all four groups: a single stratum of 12.
+        assert on.ci_expanded == pytest.approx(_hesterberg_level(12))
+        assert off.ci_expanded is None
+        assert (on.bca_high - on.bca_low) > (off.bca_high - off.bca_low)
+        assert (on.pct_high - on.pct_low) > (off.pct_high - off.pct_low)
+        assert "ci_expanded" in on.results.columns and "ci_expanded" not in off.results.columns
+        assert "read at the" in repr(on)
+
+    on = load(df, **mini_meta_kwargs).mean_diff.mini_meta
+    off = load(df, cluster_ci_expansion=False, **mini_meta_kwargs).mean_diff.mini_meta
+    assert on.ci_expanded > 95 and off.ci_expanded is None
+    assert (on.bca_high - on.bca_low) > (off.bca_high - off.bca_low)
+    assert (on.pct_high - on.pct_low) > (off.pct_high - off.pct_low)
+    assert "ci_expanded" in on.results.columns and "ci_expanded" not in off.results.columns
+    assert "read at the" in repr(on) and "read at the" not in repr(off)
+
+
+def test_expansion_edge_cases():
+    import warnings
+
+    rng = np.random.default_rng(7)
+    # Two or three clusters: extreme but valid limits, and no index errors.
+    for n_clusters in (2, 3):
+        clusters = np.repeat(np.arange(n_clusters), 4)
+        control = rng.normal(0, 1, clusters.size)
+        test = control + 0.5 + rng.normal(0, 1, clusters.size)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = TwoGroupsEffectSize(control, test, "mean_diff", is_paired="baseline", resamples=300,
+                                         permutation_count=10, control_clusters=clusters, test_clusters=clusters)
+        assert result.ci_expanded > 99
+        assert result.bca_low <= result.difference <= result.bca_high
+        assert result.pct_low <= result.pct_high
+
+    # Too few clusters to resample: the user is warned the interval is unreliable,
+    # whether there are too few clusters overall ...
+    clusters = np.repeat(np.arange(5), 4)
+    control = rng.normal(0, 1, clusters.size)
+    with pytest.warns(UserWarning, match="Only 5 clusters"):
+        TwoGroupsEffectSize(control, control + 0.5 + rng.normal(0, 1, clusters.size), "mean_diff",
+                            is_paired="baseline", resamples=300, permutation_count=10,
+                            control_clusters=clusters, test_clusters=clusters)
+    # ... or too few in one of the independently resampled groups of clusters.
+    control, test = rng.normal(0, 1, 12), rng.normal(1, 1, 24)
+    with pytest.warns(UserWarning, match=r"Only 9 clusters .*\(3 in the smallest"):
+        TwoGroupsEffectSize(control, test, "mean_diff", resamples=300, permutation_count=10,
+                            control_clusters=np.repeat(np.arange(3), 4),
+                            test_clusters=np.repeat(np.arange(10, 16), 4))
+    # Enough clusters: no such warning.
+    clusters = np.repeat(np.arange(6), 4)
+    control = rng.normal(0, 1, clusters.size)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        TwoGroupsEffectSize(control, control + 0.5 + rng.normal(0, 1, clusters.size), "mean_diff",
+                            is_paired="baseline", resamples=1000, permutation_count=10,
+                            control_clusters=clusters, test_clusters=clusters)
+    assert not any("available to resample" in str(w.message) for w in caught)
+
+    # One cluster per group: nothing can be expanded, and the user is told so.
+    control, test = rng.normal(0, 1, 5), rng.normal(1, 1, 5)
+    with pytest.warns(UserWarning, match="too few clusters"):
+        result = TwoGroupsEffectSize(control, test, "mean_diff", resamples=200, permutation_count=10,
+                                     control_clusters=np.zeros(5), test_clusters=np.ones(5))
+    assert result.ci_expanded is None
+
+    # Opt-out on the direct API, and argument validation.
+    clusters = np.repeat(np.arange(6), 2)
+    control = rng.normal(0, 1, 12)
+    result = TwoGroupsEffectSize(control, control + 1, "mean_diff", is_paired="baseline", resamples=200,
+                                 permutation_count=10, control_clusters=clusters, test_clusters=clusters,
+                                 cluster_ci_expansion=False)
+    assert result.ci_expanded is None and result.expansion_df is None
+    with pytest.raises(TypeError, match="cluster_ci_expansion"):
+        TwoGroupsEffectSize(control, control + 1, "mean_diff", resamples=200, control_clusters=clusters,
+                            test_clusters=clusters, cluster_ci_expansion="yes")
+    with pytest.raises(TypeError, match="cluster_ci_expansion"):
+        load(DF, cluster_col="ID", cluster_ci_expansion=1, **PAIRED_KWARGS)
+    with pytest.raises(ValueError, match="same column as `x`"):
+        load(DF, cluster_col="Level", **PAIRED_KWARGS)
+
+
+def test_expansion_for_every_effect_size_and_plot(clustered):
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    matplotlib.use("Agg")
+    for effect_size in ("mean_diff", "median_diff", "cohens_d", "hedges_g"):
+        results = getattr(clustered, effect_size).results
+        assert (results["ci_expanded"] > 95).all(), effect_size
+        assert (results["bca_low"] <= results["difference"]).all()
+        assert (results["difference"] <= results["bca_high"]).all()
+
+    unpaired = load(DF, idx=("L1", "L3"), x="Level", y="Y", cluster_col="ID", resamples=300)
+    assert unpaired.cliffs_delta.results["ci_expanded"].iloc[0] > 95
+
+    df = DF.copy()
+    df["Yes"] = (np.random.default_rng(1).random(len(df)) < 0.4).astype(int)
+    proportional = load(df, idx=("L1", "L3"), x="Level", y="Yes", proportional=True,
+                        cluster_col="ID", resamples=300)
+    for effect_size in ("mean_diff", "cohens_h"):
+        assert getattr(proportional, effect_size).results["ci_expanded"].iloc[0] > 95
+
+    assert clustered.mean_diff.plot(show_baseline_ec=True) is not None
+    plt.close("all")

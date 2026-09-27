@@ -26,6 +26,7 @@ def load(
     mini_meta=False,
     ps_adjust=False,
     cluster_col=None,
+    cluster_ci_expansion=True,
 ):
     """
     Loads data in preparation for estimation statistics.
@@ -108,6 +109,32 @@ def load(
         `.plot(show_baseline_ec=True)` is always an unpaired comparison (see
         that argument's docstring), so with `cluster_col` set it can become
         much wider than a paired analysis's real effect-size curves.
+    cluster_ci_expansion : boolean, default True
+        Only used when `cluster_col` is set. Bootstrap confidence intervals are
+        too narrow when there are few independent units: with around 15 to 30
+        clusters, a nominal 95% cluster-bootstrap interval typically covers the
+        true effect only 90 to 94% of the time. When True, the percentile and
+        bias-corrected and accelerated intervals (including those of the
+        baseline error curve, delta-delta and mini-meta analyses) are therefore
+        expanded for the number of clusters with the expanded percentile
+        method of Hesterberg (2015, The American Statistician, 69(4),
+        371-386): each interval is read further into the tails of the same
+        bootstrap distribution, at a level derived from a t distribution with
+        degrees of freedom based on the number of clusters. When clusters are
+        nested within groups, or some clusters appear in only some groups, the
+        conservative choice of the smallest group of clusters' degrees of
+        freedom is used. The reported confidence level (`ci`) is unchanged; the
+        level actually read is reported as `ci_expanded` in the results. The
+        correction fades as the number of clusters grows. In simulations the
+        expanded intervals came close to nominal coverage for every effect size
+        once there were at least 6 clusters in all and at least 4 in each
+        independently resampled group of clusters (for example 6 participants
+        who each take part in every condition, or 8 participants split between
+        two conditions); with fewer, no bootstrap interval is reliable, and a
+        warning is given. Because expanded intervals are read further into the
+        tails of the bootstrap distribution, consider increasing `resamples`
+        (to 20000, say) when there are few clusters. Set to False to report
+        unexpanded cluster-bootstrap intervals.
 
     Returns
     -------
@@ -133,6 +160,7 @@ def load(
         mini_meta,
         ps_adjust,
         cluster_col=cluster_col,
+        cluster_ci_expansion=cluster_ci_expansion,
     )
 
 # %% ../nbs/API/load.ipynb #570ff65a

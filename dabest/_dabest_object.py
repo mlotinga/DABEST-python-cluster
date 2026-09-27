@@ -42,6 +42,7 @@ class Dabest(object):
         mini_meta,
         ps_adjust,
         cluster_col=None,
+        cluster_ci_expansion=True,
     ):
         """
         Parses and stores pandas DataFrames in preparation for estimation
@@ -62,6 +63,7 @@ class Dabest(object):
         self.__is_mini_meta = mini_meta
         self.__ps_adjust = ps_adjust
         self.__cluster_col = cluster_col
+        self.__cluster_ci_expansion = cluster_ci_expansion
 
         # after this call the attributes self.__experiment_label and self.__x1_level are updated
         self._check_errors(x, y, idx, experiment, experiment_label, x1_level)
@@ -134,6 +136,11 @@ class Dabest(object):
             cluster_line1 = "Whole clusters, as defined by `{}`, ".format(self.__cluster_col)
             cluster_line2 = "will be resampled by the bootstrap and reshuffled by the permutation test."
             out.append(cluster_line1 + cluster_line2)
+            if self.__cluster_ci_expansion:
+                out.append(
+                    "Confidence intervals will be expanded for the number of clusters "
+                    "(set `cluster_ci_expansion=False` to turn this off)."
+                )
 
         return "\n".join(out)
 
@@ -356,6 +363,14 @@ class Dabest(object):
         the permutation test reshuffles labels at the cluster level.
         """
         return self.__cluster_col
+
+    @property
+    def cluster_ci_expansion(self):
+        """
+        Returns whether confidence intervals of clustered data are expanded for
+        a small number of clusters, as declared to `dabest.load()`.
+        """
+        return self.__cluster_ci_expansion
 
     @property
     def ci(self):
@@ -599,6 +614,10 @@ class Dabest(object):
                 err = "`id_col` was given as '{}'; however, '{}' is not a column in `data`.".format(self.__id_col, self.__id_col)
                 raise IndexError(err)
 
+        # Check if `cluster_ci_expansion` is valid
+        if not isinstance(self.__cluster_ci_expansion, (bool, np.bool_)):
+            raise TypeError("`cluster_ci_expansion` must be True or False.")
+
         # Check if `cluster_col` is valid
         if self.__cluster_col is not None:
             if self.__cluster_col not in self.__output_data.columns:
@@ -608,6 +627,12 @@ class Dabest(object):
             if y is not None and self.__cluster_col == y:
                 err = "`cluster_col` cannot be the same column as `y`."
                 raise ValueError(err)
+
+            x_columns = x if isinstance(x, (list, tuple)) else [x]
+            if self.__cluster_col in x_columns:
+                err1 = "`cluster_col` cannot be the same column as `x`: every group would "
+                err2 = "then be a single cluster, leaving nothing to resample."
+                raise ValueError(err1 + err2)
 
             if x is None and idx is not None:
                 # Wide format: the cluster column cannot also be one of the groups.
@@ -755,6 +780,7 @@ class Dabest(object):
             x2=self.__x2,
             mini_meta=self.__is_mini_meta,
             ps_adjust=self.__ps_adjust,
+            cluster_ci_expansion=self.__cluster_ci_expansion,
         )
 
         self.__mean_diff = EffectSizeDataFrame(

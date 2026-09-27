@@ -69,6 +69,11 @@ class TwoGroupsEffectSize(object):
             observations from the same cluster. A label present in both
             arrays denotes the same cluster. For paired data the two arrays
             must be identical, since observations are paired by position.
+        cluster_ci_expansion : boolean, default True
+            Only used when clusters are supplied. If True, the confidence
+            intervals are expanded for a small number of clusters (see
+            `dabest.load`); if False, the unexpanded cluster-bootstrap
+            intervals are reported.
             
 
         Returns
@@ -94,6 +99,10 @@ class TwoGroupsEffectSize(object):
                 The bias-corrected and accelerated confidence interval lower limit and upper limits, respectively.
             `pct_low, pct_high` : float
                 The percentile confidence interval lower limit and upper limits, respectively.
+            `ci_expanded` : float or None
+                For clustered data, the confidence level at which the bootstrap
+                distribution was read so that the reported `ci`% intervals allow for
+                a small number of clusters; None if the intervals were not expanded.
     """
 
     def __init__(
@@ -110,6 +119,7 @@ class TwoGroupsEffectSize(object):
         ps_adjust=False,
         control_clusters=None,
         test_clusters=None,
+        cluster_ci_expansion=True,
     ):
         from ._stats_tools import confint_2group_diff as ci2g
         from ._stats_tools import effsize as es
@@ -131,6 +141,9 @@ class TwoGroupsEffectSize(object):
         self.__is_proportional = proportional
         self.__ps_adjust = ps_adjust
         self.__is_clustered = control_clusters is not None or test_clusters is not None
+        if not isinstance(cluster_ci_expansion, (bool, np.bool_)):
+            raise TypeError("`cluster_ci_expansion` must be True or False.")
+        self.__cluster_ci_expansion = bool(cluster_ci_expansion)
         self._check_errors(control, test, control_clusters, test_clusters)
 
         # Convert to numpy arrays for speed.
@@ -165,7 +178,7 @@ class TwoGroupsEffectSize(object):
         )
 
         if self.__is_clustered:
-            self.__jackknives = ci2g.compute_cluster_jackknife(
+            jackknives, deleted, codes, n_codes = ci2g.cluster_jackknife_by_cluster(
                 self.__control,
                 self.__test,
                 self.__control_clusters,
@@ -173,12 +186,24 @@ class TwoGroupsEffectSize(object):
                 self.__is_paired,
                 self.__effect_size,
             )
+            self.__jackknives = jackknives
+            # How the jackknife variance splits across the resampling strata,
+            # used to expand the interval for small numbers of clusters.
+            self.__expansion_components = ci2g.cluster_variance_components(
+                jackknives, deleted, codes, n_codes
+            )
         else:
             self.__jackknives = ci2g.compute_meandiff_jackknife(
                 self.__control, self.__test, self.__is_paired, self.__effect_size
             )
+            self.__expansion_components = None
 
         self.__acceleration_value = ci2g._calc_accel(self.__jackknives)
+
+        # Small-sample expansion of the interval for clustered data.
+        self.__ci_expanded, self.__expansion_df = self._expanded_level(
+            self.__expansion_components
+        )
 
         if self.__is_clustered:
             bootstraps = ci2g.compute_cluster_bootstrapped_diff(
@@ -225,13 +250,14 @@ class TwoGroupsEffectSize(object):
         self._compute_bca_intervals(sorted_bootstraps)
 
         # Compute percentile intervals.
-        pct_idx_low = int((self.__alpha / 2) * self.__resamples)
-        pct_idx_high = int((1 - (self.__alpha / 2)) * self.__resamples)
+        pct_idx_low, pct_idx_high = ci2g.percentile_interval_idx(
+            self._interval_level(), self.__resamples
+        )
 
         self.__pct_interval_idx = (pct_idx_low, pct_idx_high)
         self.__pct_low = sorted_bootstraps[pct_idx_low]
         self.__pct_high = sorted_bootstraps[pct_idx_high]
-        
+
         self._get_bootstrap_baseline_ec()
 
         self._perform_statistical_test()
@@ -290,8 +316,13 @@ class TwoGroupsEffectSize(object):
         p2 = "calculated for legacy purposes only. "
         pvalue = p1 + p2
 
-        bs2 = "the confidence interval is bias-corrected and accelerated."
-        bs = bs1 + bs2
+        bs2 = "the confidence interval is bias-corrected and accelerated"
+        if self.__ci_expanded is not None:
+            bs2 += (
+                ", and expanded for the small number of clusters\n(the {}% interval is "
+                "read at the {:.2f}% level of the bootstrap distribution)".format(ci_width, self.__ci_expanded)
+            )
+        bs = bs1 + bs2 + "."
 
         pval_def1 = (
             "Any p-value reported is the probability of observing the"
@@ -355,18 +386,76 @@ class TwoGroupsEffectSize(object):
             )
             raise ValueError(err1)
 
+    def _expanded_level(self, components):
+        '''
+        The level at which to read the cluster-bootstrap distribution, expanded
+        for small numbers of clusters, and its degrees of freedom. Returns
+        `(None, None)` when the interval is not expanded.
+        '''
+        from ._stats_tools import confint_2group_diff as ci2g
+
+        if not (self.__is_clustered and self.__cluster_ci_expansion):
+            return None, None
+
+        ci_expanded, df = ci2g.expanded_ci_level(self.__ci, components)
+        if df is None:
+            warnings.warn(
+                "There are too few clusters (fewer than 2 in every resampling stratum) "
+                "to expand the confidence interval for a small number of clusters; "
+                "the unexpanded interval is reported, and it will be too narrow."
+            )
+            return None, None
+        # In simulations, expanded intervals came close to nominal coverage once
+        # there were at least 6 clusters in all, and at least 4 in the smallest
+        # group of clusters that sets the degrees of freedom.
+        n_total = sum(n for _, n in components if n >= 2)
+        if n_total < 6 or df + 1 < 4:
+            warnings.warn(
+                "Only {} clusters are available to resample ({} in the smallest group of "
+                "clusters); even after expansion for the small number of clusters, the "
+                "confidence interval is unreliable and likely too narrow. At least 6 "
+                "clusters, and at least 4 in every group of clusters, are "
+                "recommended.".format(int(n_total), int(df + 1))
+            )
+        return ci_expanded, df
+
+    def _interval_level(self):
+        '''
+        The confidence level at which the bootstrap distribution is read:
+        the expanded level when the interval is expanded, otherwise `ci`.
+        '''
+        return self.__ci_expanded if self.__ci_expanded is not None else self.__ci
+
+    def _bca_interval_idx(self, bias, acceleration, ci_expanded):
+        '''
+        Indexes of the BCa interval limits. When `ci_expanded` is given, the
+        interval is read at that expanded level; if the BCa adjustment is
+        undefined there, the expanded percentile limits are used instead.
+        '''
+        from ._stats_tools import confint_2group_diff as ci2g
+
+        if ci_expanded is None:
+            return ci2g.compute_interval_limits(bias, acceleration, self.__resamples, self.__ci)
+
+        low, high = ci2g.expanded_interval_limits(bias, acceleration, self.__resamples, ci_expanded)
+        if (isnan(low) or isnan(high)) and np.isfinite(bias):
+            warnings.warn(
+                "The bias-corrected and accelerated adjustment is undefined at the "
+                "expanded confidence level; the expanded percentile interval is "
+                "reported in its place."
+            )
+            low, high = ci2g.percentile_interval_idx(ci_expanded, self.__resamples)
+        return low, high
+
     def _compute_bca_intervals(self, sorted_bootstraps):
         '''
         Function to compute the bca intervals given the sorted bootstraps.
         '''
-        from ._stats_tools import confint_2group_diff as ci2g
-
         # Compute BCa intervals.
-        bca_idx_low, bca_idx_high = ci2g.compute_interval_limits(
+        bca_idx_low, bca_idx_high = self._bca_interval_idx(
             self.__bias_correction,
             self.__acceleration_value,
-            self.__resamples,
-            self.__ci,
+            self.__ci_expanded,
         )
 
         self.__bca_interval_idx = (bca_idx_low, bca_idx_high)
@@ -545,15 +634,27 @@ class TwoGroupsEffectSize(object):
             # so the clusters of the second copy are given distinct labels.
             (codes,), n_clusters = ci2g.cluster_codes(self.__control_clusters)
             codes_copy = codes + n_clusters
-            jackknives = ci2g.compute_cluster_jackknife(
+            jackknives, deleted, jack_codes, n_codes = ci2g.cluster_jackknife_by_cluster(
                 self.__control, self.__control, codes, codes_copy, is_paired, self.__effect_size
             )
+            bec_components = ci2g.cluster_variance_components(jackknives, deleted, jack_codes, n_codes)
         else:
             jackknives = ci2g.compute_meandiff_jackknife(
                 self.__control, self.__control, is_paired, self.__effect_size
             )
+            bec_components = None
 
         acceleration_value = ci2g._calc_accel(jackknives)
+
+        # The baseline curve is expanded for small numbers of clusters in the same
+        # way as the effect size itself; the warning for too few clusters, if any,
+        # has already been given for the effect size.
+        bec_ci_expanded = None
+        if self.__ci_expanded is not None:
+            level, df = ci2g.expanded_ci_level(self.__ci, bec_components)
+            if df is not None:
+                bec_ci_expanded = level
+        self.__bec_ci_expanded = bec_ci_expanded
 
         if self.__is_clustered:
             bootstraps = ci2g.compute_cluster_bootstrapped_diff(
@@ -585,11 +686,10 @@ class TwoGroupsEffectSize(object):
         )
 
         # Compute BCa intervals.
-        bca_idx_low, bca_idx_high = ci2g.compute_interval_limits(
+        bca_idx_low, bca_idx_high = self._bca_interval_idx(
             bias_correction,
             acceleration_value,
-            self.__resamples,
-            self.__ci,
+            bec_ci_expanded,
         )
 
         self.__bec_bca_interval_idx = (bca_idx_low, bca_idx_high)
@@ -628,8 +728,9 @@ class TwoGroupsEffectSize(object):
                 warnings.warn(err_temp.substitute(lim_type="upper"), stacklevel=0)
 
         # Compute percentile intervals.
-        pct_idx_low = int((self.__alpha / 2) * self.__resamples)
-        pct_idx_high = int((1 - (self.__alpha / 2)) * self.__resamples)
+        pct_idx_low, pct_idx_high = ci2g.percentile_interval_idx(
+            bec_ci_expanded if bec_ci_expanded is not None else self.__ci, self.__resamples
+        )
 
         self.__bec_pct_interval_idx = (pct_idx_low, pct_idx_high)
         self.__bec_pct_low = sorted_bootstraps[pct_idx_low]
@@ -672,6 +773,40 @@ class TwoGroupsEffectSize(object):
         None if the observations are not clustered.
         """
         return self.__n_clusters
+
+    @property
+    def cluster_ci_expansion(self):
+        """
+        Whether the confidence interval of clustered data is expanded for a
+        small number of clusters.
+        """
+        return self.__cluster_ci_expansion
+
+    @property
+    def ci_expanded(self):
+        """
+        The confidence level, in percent, at which the cluster-bootstrap
+        distribution was read so that the reported `ci`% interval allows for a
+        small number of clusters (see `dabest.load`'s `cluster_ci_expansion`).
+        None if the interval was not expanded.
+        """
+        return self.__ci_expanded
+
+    @property
+    def expansion_df(self):
+        """
+        The degrees of freedom used to expand the confidence interval for a
+        small number of clusters; None if the interval was not expanded.
+        """
+        return self.__expansion_df
+
+    @property
+    def _expansion_components(self):
+        """
+        The stratum-by-stratum `(variance, n_clusters)` components of the
+        cluster jackknife variance; None if the observations are not clustered.
+        """
+        return self.__expansion_components
 
     @property
     def ci(self):
@@ -956,6 +1091,7 @@ class EffectSizeDataFrame(object):
         experiment_label=None,
         mini_meta=False,
         ps_adjust=False,
+        cluster_ci_expansion=True,
     ):
         """
         Parses the data from a Dabest object, enabling plotting and printing
@@ -976,6 +1112,9 @@ class EffectSizeDataFrame(object):
         self.__delta2 = delta2
         self.__is_mini_meta = mini_meta
         self.__ps_adjust = ps_adjust
+        self.__cluster_ci_expansion = cluster_ci_expansion
+        self.__expansion_components = []
+        self.__delta2_ci_expanded = None
 
     def __pre_calc(self):
         from .misc_tools import print_greeting, get_varname
@@ -989,6 +1128,8 @@ class EffectSizeDataFrame(object):
 
         out = []
         reprs = []
+        self.__expansion_components = []
+        self.__delta2_ci_expanded = None
 
         grouped_data = {name: group[yvar].copy() for name, group in dat.groupby(xvar, observed=False)}
 
@@ -1027,6 +1168,15 @@ class EffectSizeDataFrame(object):
                 self.__is_proportional,
                 clusters=mixed_clusters if cluster_col is not None else None,
             )
+            if cluster_col is not None and self.__cluster_ci_expansion:
+                # Expand the delta-delta interval for a small number of clusters.
+                components = ci2g.delta2_cluster_variance_components(
+                    *[np.asarray(x) for x in mixed_data[:4]],
+                    *mixed_clusters[:4],
+                    self.__is_paired,
+                )
+                level, df = ci2g.expanded_ci_level(self.__ci, components)
+                self.__delta2_ci_expanded = level if df is not None else None
 
         for j, current_tuple in enumerate(idx):
             if self.__is_paired != "sequential":
@@ -1051,7 +1201,9 @@ class EffectSizeDataFrame(object):
                     self.__ps_adjust,
                     control_clusters=grouped_clusters[cname],
                     test_clusters=grouped_clusters[tname],
+                    cluster_ci_expansion=self.__cluster_ci_expansion,
                 )
+                self.__expansion_components.append(result._expansion_components)
                 r_dict = result.to_dict()
                 r_dict["control"] = cname
                 r_dict["test"] = tname
@@ -1095,6 +1247,7 @@ class EffectSizeDataFrame(object):
             "is_paired",
             "difference",
             "ci",
+            "ci_expanded",
             "bca_low",
             "bca_high",
             "bca_interval_idx",
@@ -1150,7 +1303,8 @@ class EffectSizeDataFrame(object):
             )
         elif self.__delta2:
             self.__delta_delta = DeltaDelta(
-                self, self.__permutation_count, bootstraps_delta_delta, self.__ci
+                self, self.__permutation_count, bootstraps_delta_delta, self.__ci,
+                ci_expanded=self.__delta2_ci_expanded,
             )
             reprs.append(self.__delta_delta.__repr__(header=False))
 
@@ -1686,6 +1840,8 @@ class EffectSizeDataFrame(object):
 
         if "n_clusters" in results_df.columns:
             default_cols.insert(default_cols.index("effect_size"), "n_clusters")
+        if "ci_expanded" in results_df.columns:
+            default_cols.insert(default_cols.index("ci") + 1, "ci_expanded")
 
         cols_of_interest = default_cols + stats_columns
 
@@ -1694,6 +1850,27 @@ class EffectSizeDataFrame(object):
     @property
     def _for_print(self):
         return self.__for_print
+
+    @property
+    def cluster_ci_expansion(self):
+        """
+        Whether confidence intervals of clustered data are expanded for a small
+        number of clusters.
+        """
+        return self.__cluster_ci_expansion
+
+    @property
+    def _expansion_components(self):
+        """
+        For each comparison, in the order of `results`, the stratum-by-stratum
+        `(variance, n_clusters)` components of its cluster jackknife variance,
+        or None if the observations are not clustered.
+        """
+        try:
+            self.__results
+        except AttributeError:
+            self.__pre_calc()
+        return self.__expansion_components
 
     @property
     def _plot_data(self):
