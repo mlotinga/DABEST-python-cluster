@@ -700,6 +700,18 @@ def get_color_palette(
     return (color_col, bootstraps_color_by_group, n_groups, filled, raw_colors,
             plot_palette_raw, plot_palette_contrast, plot_palette_sankey)
 
+def _tick_label_gap_inches(n_lines: int, fontsize) -> float:
+    """
+    Vertical gap, in inches, that keeps `n_lines` of tick labels at `fontsize`
+    on the upper (raw data) axes clear of the lower (contrast) axes: the text,
+    plus room for the tick marks and a small margin.
+    """
+    from matplotlib.font_manager import FontProperties
+
+    size_pt = FontProperties(size=fontsize).get_size_in_points()
+    return (n_lines * 1.2 * size_pt + 14) / 72
+
+
 def _hspace_for_tick_labels(
         n_lines: int,
         fontsize,
@@ -711,13 +723,9 @@ def _hspace_for_tick_labels(
     tick labels on the upper (raw data) axes clear of the lower (contrast) axes.
 
     `available_height` is the height in inches shared by both axes and the gap
-    between them. The gap needed is `n_lines` of text at `fontsize`, plus room
-    for the tick marks and a small margin. Never returns less than `minimum`.
+    between them (see `_tick_label_gap_inches`). Never returns less than `minimum`.
     """
-    from matplotlib.font_manager import FontProperties
-
-    size_pt = FontProperties(size=fontsize).get_size_in_points()
-    needed = (n_lines * 1.2 * size_pt + 14) / 72  # inches
+    needed = _tick_label_gap_inches(n_lines, fontsize)
     # Axes heights h and gap g satisfy 2h + g = available_height and g = hspace * h.
     remaining = max(available_height - needed, 0.25 * available_height)
     return max(minimum, 2 * needed / remaining)
@@ -874,14 +882,31 @@ def initialize_fig(
                 )
 
                 contrast_axes = axins
+            elif size_gap_to_labels:
+                # The contrast axes hangs a fixed distance below the raw data
+                # axes, sized to the tick labels, rather than a fraction of the
+                # axes' height: a layout engine that later resizes the raw data
+                # axes (e.g. with `figure.autolayout`) would otherwise stretch
+                # the gap along with it.
+                fig_height = fig.get_figheight()
+                available = (ax_position.y1 - ax_position.y0) * fig_height  # inches
+                gap = max(min(_tick_label_gap_inches(n_label_lines, fontsize_rawxlabel), 0.75 * available),
+                          h_space_cummings * available / (2 + h_space_cummings))
+                plot_height = (available - gap) / 2
+                axins = rawdata_axes.inset_axes(
+                    [0, -1, 1, 1],
+                    transform=rawdata_axes.transAxes
+                    + matplotlib.transforms.ScaledTranslation(0, -gap, fig.dpi_scale_trans),
+                )
+                rawdata_axes.set_position(
+                    [
+                        ax_position.x0,
+                        ax_position.y0 + (plot_height + gap) / fig_height,
+                        (ax_position.x1 - ax_position.x0),
+                        plot_height / fig_height,
+                    ]
+                )
             else:
-                if size_gap_to_labels:
-                    h_space_cummings = _hspace_for_tick_labels(
-                        n_label_lines,
-                        fontsize_rawxlabel,
-                        (ax_position.y1 - ax_position.y0) * fig.get_figheight(),
-                        h_space_cummings,
-                    )
                 axins = rawdata_axes.inset_axes([0, -1 - h_space_cummings, 1, 1])
                 plot_height = (ax_position.y1 - ax_position.y0) / (2 + h_space_cummings)
                 rawdata_axes.set_position(

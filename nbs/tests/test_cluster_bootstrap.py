@@ -291,13 +291,14 @@ def test_cumming_layout_makes_room_for_cluster_label(naive, clustered):
     clustered_gap = gap(clustered.mean_diff.plot(float_contrast=False))
     assert clustered_gap > naive_gap
 
-    # Figures drawn into a user-supplied axes (the contrast axes is an inset).
+    # Figures drawn into a user-supplied axes (the contrast axes is an inset,
+    # placed when the figure is drawn).
     def inset_gap(dabest_obj):
         f, ax = plt.subplots()
         dabest_obj.mean_diff.plot(ax=ax, float_contrast=False)
-        raw = ax.get_position()
-        contrast = ax.contrast_axes.get_position()
-        return raw.y0 - contrast.y1
+        f.canvas.draw()
+        renderer = f.canvas.get_renderer()
+        return ax.get_window_extent(renderer).y0 - ax.contrast_axes.get_window_extent(renderer).y1
 
     assert inset_gap(clustered) > inset_gap(naive)
 
@@ -343,6 +344,33 @@ def test_cluster_labels_clear_the_contrast_axes():
         dabest_obj.mean_diff.plot(ax=ax, **user_kwargs)
         assert _label_clearance(ax, ax.contrast_axes) > 0, user_kwargs
         plt.close("all")
+
+
+def test_gap_for_cluster_labels_survives_autolayout(naive, clustered):
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    matplotlib.use("Agg")
+
+    def gap_points(dabest_obj):
+        """Points between the raw data axes and the contrast axes, and below the tick labels."""
+        f, ax = plt.subplots(figsize=(6.5, 3.5))
+        dabest_obj.mean_diff.plot(ax=ax, float_contrast=False)
+        clearance = _label_clearance(ax, ax.contrast_axes)
+        renderer = f.canvas.get_renderer()
+        gap = ax.get_window_extent(renderer).y0 - ax.contrast_axes.get_window_extent(renderer).y1
+        plt.close("all")
+        return gap * 72 / f.dpi, clearance * 72 / f.dpi
+
+    # `figure.autolayout` resizes the user's axes after dabest has laid it out;
+    # the gap for the cluster labels must not be stretched along with it.
+    plain_gap, plain_clearance = gap_points(clustered)
+    with matplotlib.rc_context({"figure.autolayout": True}):
+        auto_gap, auto_clearance = gap_points(clustered)
+        naive_gap, _ = gap_points(naive)
+    assert auto_gap == pytest.approx(plain_gap, abs=1)
+    assert 0 < auto_clearance < 20 and 0 < plain_clearance < 20
+    assert auto_gap < 1.5 * naive_gap
 
 
 # ---------------------------------------------------------------------------
